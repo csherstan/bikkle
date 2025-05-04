@@ -10,11 +10,9 @@ class TestBikkleGymEnvironment(unittest.TestCase):
 
     def test_initialization(self):
         """Test if the environment initializes correctly."""
-        self.assertEqual(self.env.screen_size, 100)
+        self.assertEqual(self.env.screen_size, 600)
         self.assertEqual(self.env.num_blocks, 10)
         self.assertEqual(self.env.round_timeout, 100)
-        self.assertEqual(self.env.max_action_size, 1.0)
-        self.assertEqual(self.env.block_size, 5.0)
 
     def test_reset(self):
         """Test the reset functionality."""

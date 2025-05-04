@@ -9,9 +9,12 @@ from gymnasium.spaces import Sequence, Box, Dict
 
 class BikkleGymEnvironment(gym.Env):
     def __init__(self, default_pink_reward: float = 1.0, high_pink_reward: float = 10.0, cyan_penalty: float = -1.0,
-                 screen_size: int = 300, num_blocks: int = 10, round_timeout: int = 100, max_action_size: float = 1.0,
-                 block_size: float = 5.0) -> None:
+                 screen_size: int = 600, num_blocks: int = 10, round_timeout: int = 100, max_action_size: float = 0.01,
+                 block_size: float = 0.02) -> None:
         super().__init__()
+
+        assert block_size < 1.0
+        assert max_action_size < 1.0
 
         self.cyan_blocks = []
         self.pink_blocks = []
@@ -21,12 +24,16 @@ class BikkleGymEnvironment(gym.Env):
         self.num_blocks = num_blocks
         self.round_timeout = round_timeout
         self.max_action_size = max_action_size
+        self.max_action_pixels = max_action_size * screen_size
         self.block_size = block_size
+        self.block_size_pixels = block_size * screen_size
 
-        self.steps = 0  # number of steps taken in the current round
+        self.round_steps_count = 0  # number of steps taken in the current round
+        self.total_reward = 0.0  # cumulative reward
+        self.steps_since_reset = 0  # total number of steps
 
         # Define action space: agent can move in x and y directions
-        self.action_space = spaces.Box(low=-self.max_action_size, high=self.max_action_size, shape=(2,), dtype=np.float32)
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
 
         # Define observation space
         self.observation_space = Dict({
@@ -52,12 +59,15 @@ class BikkleGymEnvironment(gym.Env):
         super().reset(seed=seed)
         self.cyan_blocks, self.pink_blocks = self._generate_blocks()
         while True:
-            self.agent_position = np.float32(np.random.uniform(low=0, high=self.screen_size, size=2))
-            if all(np.linalg.norm(self.agent_position - np.array(block)) > (self.block_size * 2) for block in
+            self.agent_position = np.random.uniform(low=0, high=1, size=2)  # Normalized position
+            if all(not self._is_touching(self.agent_position, np.array(block)) for block in
                    (self.cyan_blocks + self.pink_blocks)):
                 break
+
         self.high_reward_block = random.choice(range(len(self.pink_blocks)))
-        self.steps = 0
+        self.round_steps_count = 0
+        self.total_reward = 0.0
+        self.steps_since_reset = 0
 
         self._update_screen_image()
 
@@ -66,13 +76,13 @@ class BikkleGymEnvironment(gym.Env):
 
     def _handle_timeout(self) -> None:
         """Handle timeout by changing the high reward block and resetting the timer."""
-        self.steps = 0
+        self.round_steps_count = 0
         self.high_reward_block = random.choice(range(len(self.pink_blocks)))
 
     def step(self, action: np.ndarray) -> tuple[dict, float, bool, bool, dict]:
         # Update agent position
-        self.agent_position += np.clip(action, -1.0, 1.0)
-        self.agent_position = np.clip(self.agent_position, 0, self.screen_size)
+        self.agent_position += np.clip(action, -1.0, 1.0) * self.max_action_size
+        self.agent_position = np.clip(self.agent_position, 0, 1.0)
 
         # Check for collisions and calculate reward
         reward = 0.
@@ -92,15 +102,22 @@ class BikkleGymEnvironment(gym.Env):
                     self.high_reward_block = random.choice(range(len(self.pink_blocks)))
                 break
 
-        # Increment step count
-        self.steps += 1
-        if self.steps >= self.round_timeout:
+        # Increment step count and update total reward
+        self.round_steps_count += 1
+        self.steps_since_reset += 1
+        self.total_reward += reward
+        average_reward = self.total_reward / self.steps_since_reset
+
+        if self.round_steps_count >= self.round_timeout:
             self._handle_timeout()
 
         self._update_screen_image()
 
         # Return step information
-        return self._get_observation(), reward, False, False, {"high_reward_block": self.high_reward_block}
+        return self._get_observation(), reward, False, False, {
+            "high_reward_block": self.high_reward_block,
+            "average_reward": average_reward
+        }
 
     def _generate_blocks(self) -> tuple[list[list[float]], list[list[float]]]:
         cyan_blocks = []
@@ -115,10 +132,11 @@ class BikkleGymEnvironment(gym.Env):
 
     def _generate_new_block(self) -> list[float]:
         while True:
-            x, y = np.float32(np.random.uniform(0, self.screen_size, size=2))
+            x, y = np.random.uniform(0, 1, size=2)  # Normalized block position
             new_block = [x, y]
             # Ensure the new block does not overlap with existing blocks
-            if all(np.linalg.norm(np.array(new_block) - np.array(block)) > (self.block_size * 2) for block in
+            if all(not self._is_touching(np.array(new_block, dtype=np.float32), np.array(block, dtype=np.float32)) for
+                   block in
                    (self.cyan_blocks + self.pink_blocks)):
                 return new_block
 
@@ -128,12 +146,11 @@ class BikkleGymEnvironment(gym.Env):
             "cyan_blocks": self.cyan_blocks,
             "pink_blocks": self.pink_blocks,
             "screen_image": self.render(mode="rgb_array"),
-            "steps": self.steps
+            "steps": self.round_steps_count
         }
 
-    def _is_touching(self, position: np.ndarray, block_position: list[float]) -> bool:
+    def _is_touching(self, position: np.ndarray, block_position: np.ndarray) -> bool:
         return np.linalg.norm(position - block_position) <= self.block_size  # Collision threshold
-
 
     def _update_screen_image(self) -> None:
         if self.window is None:
@@ -145,24 +162,40 @@ class BikkleGymEnvironment(gym.Env):
         self.window.fill((0, 0, 0))  # Clear screen with black
 
         # Draw cyan blocks
+        # Draw cyan blocks
         for block in self.cyan_blocks:
-            pygame.draw.circle(self.window, (0, 255, 255), (int(block[0]), int(block[1])), int(self.block_size))
+            pygame.draw.circle(self.window, (0, 255, 255),
+                               (int(block[0] * self.screen_size), int(block[1] * self.screen_size)),
+                               int(self.block_size * self.screen_size))
 
         # Draw pink blocks
         for i, block in enumerate(self.pink_blocks):
-            color = (255, 20, 147) if i == self.high_reward_block else (255, 182, 193)
-            pygame.draw.circle(self.window, color, (int(block[0]), int(block[1])), int(self.block_size))
+            color = (255, 105, 180)  # Hot pink
+            pygame.draw.circle(self.window, color,
+                               (int(block[0] * self.screen_size), int(block[1] * self.screen_size)),
+                               int(self.block_size * self.screen_size))
 
         # Draw agent
-        pygame.draw.circle(self.window, (255, 255, 255), (int(self.agent_position[0]), int(self.agent_position[1])),
-                           int(self.block_size))
+        pygame.draw.circle(self.window, (255, 255, 255),
+                           (int(self.agent_position[0] * self.screen_size),
+                            int(self.agent_position[1] * self.screen_size)),
+                           int(self.block_size * self.screen_size))
 
         self._agent_image = pygame.surfarray.array3d(pygame.display.get_surface())
 
         high_reward_block = self.pink_blocks[self.high_reward_block]
+        pygame.draw.circle(self.window, (0, 255, 0),
+                           (int(high_reward_block[0] * self.screen_size), int(high_reward_block[1] * self.screen_size)),
+                           int(self.block_size * self.screen_size))
 
-        pygame.draw.circle(self.window, (0, 255, 0), (int(high_reward_block[0]), int(high_reward_block[1])), int(self.block_size))
+        # Render text for average reward and countdown
+        font = pygame.font.SysFont(None, 24)
+        avg_reward_text = font.render(f"Avg Reward: {self.total_reward / max(1, self.steps_since_reset):.2f}", True,
+                                      (255, 255, 255))
+        countdown_text = font.render(f"Countdown: {self.round_timeout - self.round_steps_count}", True, (255, 255, 255))
 
+        self.window.blit(avg_reward_text, (10, 10))  # Display average reward at the top-left corner
+        self.window.blit(countdown_text, (10, 40))  # Display countdown below the average reward
 
     def render(self, mode: str = "human") -> np.ndarray | None:
 
