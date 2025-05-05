@@ -11,7 +11,7 @@ from gymnasium.spaces import Sequence, Box, Dict
 
 class BikkleGymEnvironment(gym.Env):
     def __init__(self, default_pink_reward: float = 1.0, high_pink_reward: float = 10.0, cyan_penalty: float = -1.0,
-                 screen_size: int = 600, num_blocks: int = 10, round_timeout: int = 100, max_action_size: float = 0.01,
+                 screen_size: int = 600, num_blocks: int = 20, round_timeout: int = 100, max_action_size: float = 0.01,
                  block_size: float = 0.02) -> None:
         super().__init__()
 
@@ -32,7 +32,8 @@ class BikkleGymEnvironment(gym.Env):
 
         self.round_steps_count = 0  # number of steps taken in the current round
 
-        self.recent_rewards = deque(maxlen=1000)  # Sliding window for recent rewards
+        self.recent_rewards = deque(maxlen=1000)
+        self.recent_action_norms = deque(maxlen=1000)  # Sliding window for recent action norms
 
         # Define action space: agent can move in x and y directions
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
@@ -84,6 +85,8 @@ class BikkleGymEnvironment(gym.Env):
     def step(self, action: np.ndarray) -> tuple[dict, float, bool, bool, dict]:
         # Update agent position
         self.agent_position += np.clip(action, -1.0, 1.0) * self.max_action_size
+        action_norm = np.linalg.norm(action)  # Calculate the norm of the action
+        self.recent_action_norms.append(action_norm)  # Track the action norm
         self.agent_position = np.clip(self.agent_position, 0, 1.0)
 
         # Check for collisions and calculate reward
@@ -108,7 +111,6 @@ class BikkleGymEnvironment(gym.Env):
         self.round_steps_count += 1
         self.steps_since_reset += 1
         self.recent_rewards.append(reward)
-        average_reward = sum(self.recent_rewards) / len(self.recent_rewards)
 
         if self.round_steps_count >= self.round_timeout:
             self._handle_timeout()
@@ -118,7 +120,8 @@ class BikkleGymEnvironment(gym.Env):
         # Return step information
         return self._get_observation(), reward, False, False, {
             "high_reward_block": self.high_reward_block,
-            "average_reward": average_reward
+            "average_reward": sum(self.recent_rewards) / max(len(self.recent_rewards), 1),
+            "average_action_norm": sum(self.recent_action_norms) / max(len(self.recent_action_norms), 1)
         }
 
     def _generate_blocks(self) -> tuple[list[list[float]], list[list[float]]]:
@@ -152,7 +155,7 @@ class BikkleGymEnvironment(gym.Env):
         }
 
     def _is_touching(self, position: np.ndarray, block_position: np.ndarray) -> bool:
-        return np.linalg.norm(position - block_position) <= self.block_size  # Collision threshold
+        return np.linalg.norm(position - block_position) <= self.block_size*2  # Collision threshold
 
     def _update_screen_image(self) -> None:
         if self.window is None:
@@ -172,13 +175,13 @@ class BikkleGymEnvironment(gym.Env):
 
         # Draw pink blocks
         for i, block in enumerate(self.pink_blocks):
-            color = (255, 105, 180)  # Hot pink
+            color = (255, 0, 255)  # Hot pink
             pygame.draw.circle(self.window, color,
                                (int(block[0] * self.screen_size), int(block[1] * self.screen_size)),
                                int(self.block_size * self.screen_size))
 
         # Draw agent
-        pygame.draw.circle(self.window, (255, 255, 255),
+        pygame.draw.circle(self.window, (255, 128, 0),
                            (int(self.agent_position[0] * self.screen_size),
                             int(self.agent_position[1] * self.screen_size)),
                            int(self.block_size * self.screen_size))
@@ -192,7 +195,7 @@ class BikkleGymEnvironment(gym.Env):
 
         # Render text for average reward and countdown
         font = pygame.font.SysFont(None, 24)
-        avg_reward_text = font.render(f"Avg Reward: {self.total_reward / max(1, self.steps_since_reset):.2f}", True,
+        avg_reward_text = font.render(f"Avg Reward: {sum(self.recent_rewards) / max(len(self.recent_rewards), 1):.2f}", True,
                                       (255, 255, 255))
         countdown_text = font.render(f"Countdown: {self.round_timeout - self.round_steps_count}", True, (255, 255, 255))
 

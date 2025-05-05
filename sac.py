@@ -4,14 +4,12 @@ Original source: https://github.com/pytorch-labs/LeanRL/blob/main/leanrl/sac_con
 
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/sac/#sac_continuous_actionpy
 import os
+os.environ["TORCHDYNAMO_INLINE_INBUILT_NN_MODULES"] = "1"
+from pathlib import Path
+
+import gymnasium.wrappers
 
 from torch.utils._pytree import tree_map
-
-from model import BikklePolicy, preprocess_bikkle_observation_with_mask, BikkleValueFunction
-
-os.environ["TORCHDYNAMO_INLINE_INBUILT_NN_MODULES"] = "1"
-
-
 import os
 import time
 from dataclasses import dataclass
@@ -26,9 +24,8 @@ import wandb
 from tensordict import TensorDict, from_module, from_modules
 from tensordict.nn import CudaGraphModule, TensorDictModule
 
-# from stable_baselines3.common.buffers import ReplayBuffer
 from torchrl.data import ReplayBuffer, ListStorage
-
+from model import BikklePolicy, preprocess_bikkle_observation_with_mask, BikkleValueFunction
 from env import *
 
 torch.set_float32_matmul_precision('high')
@@ -85,6 +82,8 @@ class Args:
 
     max_blocks: int = 100
 
+    model_save_interval: int = 1000
+
 
 def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
@@ -93,6 +92,7 @@ def make_env(env_id, seed, idx, capture_video, run_name):
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
             env = gym.make(env_id)
+            env = gymnasium.wrappers.TimeLimit(env, max_episode_steps=300)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.action_space.seed(seed)
         return env
@@ -100,78 +100,42 @@ def make_env(env_id, seed, idx, capture_video, run_name):
     return thunk
 
 
-# ALGO LOGIC: initialize agent here:
-class SoftQNetwork(nn.Module):
-    def __init__(self, env, n_act, n_obs, device=None):
-        super().__init__()
-        self.fc1 = nn.Linear(n_act + n_obs, 256, device=device)
-        self.fc2 = nn.Linear(256, 256, device=device)
-        self.fc3 = nn.Linear(256, 1, device=device)
+class Metrics:
 
-    def forward(self, x, a):
-        x = torch.cat([x, a], 1)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = self.fc3(x)
-        return x
+    def __init__(self):
+        self._metrics = {}
 
+    def add(self, data: dict) -> None:
+        for k, v in data.items():
+            if k not in self._metrics:
+                self._metrics[k] = []
+            self._metrics[k].append(v)
 
-LOG_STD_MAX = 2
-LOG_STD_MIN = -5
+    def reset(self):
+        self._metrics = {}
 
+    def get_data(self):
+        ret_data = {}
+        for k, v in self._metrics.items():
+            ret_data[k] = np.array(v).mean()
 
-class Actor(nn.Module):
-    def __init__(self, env, n_obs, n_act, device=None):
-        super().__init__()
-        self.fc1 = nn.Linear(n_obs, 256, device=device)
-        self.fc2 = nn.Linear(256, 256, device=device)
-        self.fc_mean = nn.Linear(256, n_act, device=device)
-        self.fc_logstd = nn.Linear(256, n_act, device=device)
-        # action rescaling
-        self.register_buffer(
-            "action_scale",
-            torch.tensor((env.action_space.high - env.action_space.low) / 2.0, dtype=torch.float32, device=device),
-        )
-        self.register_buffer(
-            "action_bias",
-            torch.tensor((env.action_space.high + env.action_space.low) / 2.0, dtype=torch.float32, device=device),
-        )
+        return ret_data
 
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        mean = self.fc_mean(x)
-        log_std = self.fc_logstd(x)
-        log_std = torch.tanh(log_std)
-        log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)  # From SpinUp / Denis Yarats
-
-        return mean, log_std
-
-    def get_action(self, x):
-        mean, log_std = self(x)
-        std = log_std.exp()
-        normal = torch.distributions.Normal(mean, std)
-        x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
-        y_t = torch.tanh(x_t)
-        action = y_t * self.action_scale + self.action_bias
-        log_prob = normal.log_prob(x_t)
-        # Enforcing Action Bound
-        log_prob -= torch.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6)
-        log_prob = log_prob.sum(1, keepdim=True)
-        mean = torch.tanh(mean) * self.action_scale + self.action_bias
-        return action, log_prob, mean
 
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{args.compile}__{args.cudagraphs}"
+    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{args.compile}__{args.cudagraphs}__{int(time.time())}"
 
-    wandb.init(
+    wandb_run = wandb.init(
         project="bikkle",
         name=f"{os.path.splitext(os.path.basename(__file__))[0]}-{run_name}",
         config=vars(args),
         save_code=True,
     )
+
+    outdir = Path("data") / Path(wandb_run.name)
+    outdir.mkdir(parents=True, exist_ok=True)
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -193,11 +157,9 @@ if __name__ == "__main__":
     # actor_detach = Actor(envs, device=device, n_act=n_act, n_obs=n_obs)
 
     actor = BikklePolicy(observation_space=obs_space,
-                         action_space=action_space,
-                         device=device).to(device)
+                         action_space=action_space).to(device)
     actor_detach = BikklePolicy(observation_space=obs_space,
-                                action_space=action_space,
-                                device=device).to(device)
+                                action_space=action_space).to(device)
 
     # Copy params to actor_detach without grad
     from_module(actor).data.to_module(actor_detach)
@@ -205,13 +167,13 @@ if __name__ == "__main__":
 
 
     def get_q_params():
-        qf1 = BikkleValueFunction(observation_space=obs_space, action_space=action_space, device=device)
-        qf2 = BikkleValueFunction(observation_space=obs_space, action_space=action_space, device=device)
+        qf1 = BikkleValueFunction(observation_space=obs_space, action_space=action_space).to(device)
+        qf2 = BikkleValueFunction(observation_space=obs_space, action_space=action_space).to(device)
         qnet_params = from_modules(qf1, qf2, as_module=True)
         qnet_target = qnet_params.data.clone()
 
         # discard params of net
-        qnet = BikkleValueFunction(observation_space=obs_space, action_space=action_space, device="meta")
+        qnet = BikkleValueFunction(observation_space=obs_space, action_space=action_space).to("meta")
         qnet_params.to_module(qnet)
 
         return qnet_params, qnet_target, qnet
@@ -283,8 +245,15 @@ if __name__ == "__main__":
                                                           device=device)
         pi, log_pi, _ = actor.get_action(**preprop)
         qf_pi = torch.vmap(batched_qf, (0, None, None))(qnet_params.data, preprop, pi)
+        stddev = log_pi.exp().mean()
         min_qf_pi = qf_pi.min(0).values
         actor_loss = ((alpha * log_pi) - min_qf_pi).mean()
+
+        metrics = {
+            "actor_loss": actor_loss.detach(),
+            "alpha": alpha.detach(),
+            "stddev": stddev.detach(),
+        }
 
         actor_loss.backward()
         actor_optimizer.step()
@@ -293,11 +262,13 @@ if __name__ == "__main__":
             a_optimizer.zero_grad()
             with torch.no_grad():
                 _, log_pi, _ = actor.get_action(**preprop)
+                stddev = log_pi.exp().mean()  # Calculate the mean stddev
             alpha_loss = (-log_alpha.exp() * (log_pi + target_entropy)).mean()
+            metrics["alpha_loss"] = alpha_loss.detach()
 
             alpha_loss.backward()
             a_optimizer.step()
-        return TensorDict(alpha=alpha.detach(), actor_loss=actor_loss.detach(), alpha_loss=alpha_loss.detach())
+        return TensorDict(**metrics)
 
 
     def extend_and_sample(transition):
@@ -331,6 +302,8 @@ if __name__ == "__main__":
     desc = ""
     avg_reward = 0.0
 
+    metrics = Metrics()
+
     for global_step in pbar:
         if global_step == args.measure_burnin + args.learning_starts:
             start_time = time.time()
@@ -349,7 +322,10 @@ if __name__ == "__main__":
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
-        avg_reward = infos["average_reward"]
+        # avg_reward = infos["average_reward"]
+        # avg_action_norm = infos["average_action_norm"]
+        metrics.add({"actions": actions, "rewards": rewards, "actions_norm": np.linalg.norm(actions)})
+
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if "final_info" in infos:
             for info in infos["final_info"]:
@@ -393,7 +369,8 @@ if __name__ == "__main__":
                 ):  # compensate for the delay by doing 'actor_update_interval' instead of 1
                     out_main.update(update_pol(data))
 
-                    alpha.copy_(log_alpha.detach().exp())
+                    if args.autotune:
+                        alpha.copy_(log_alpha.detach().exp())
 
             # update the target networks
             if global_step % args.target_network_frequency == 0:
@@ -405,12 +382,16 @@ if __name__ == "__main__":
                 pbar.set_description(f"{speed: 4.4f} sps, " + desc)
                 with torch.no_grad():
                     logs = {
-                        "episode_return": torch.tensor(avg_returns).mean(),
+                        # "episode_return": torch.tensor(avg_returns).mean(),
                         "actor_loss": out_main["actor_loss"].mean(),
                         "alpha_loss": out_main.get("alpha_loss", 0),
                         "qf_loss": out_main["qf_loss"].mean(),
-                        "avg_reward": torch.tensor(avg_reward),
+                        "alpha": out_main["alpha"].mean(),
+                        "stddev": out_main["stddev"].mean(),
                     }
+
+                    logs.update(metrics.get_data())
+                    metrics.reset()
                 wandb.log(
                     {
                         "speed": speed,
@@ -418,5 +399,10 @@ if __name__ == "__main__":
                     },
                     step=global_step,
                 )
+
+            if global_step % args.model_save_interval == 0:
+                # Save models
+                torch.save(actor.state_dict(), outdir / f"actor_model_{global_step}.pth")
+                torch.save(qnet_params.state_dict(), outdir / f"qnet_model_{global_step}.pth")
 
     envs.close()

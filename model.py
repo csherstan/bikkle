@@ -8,8 +8,11 @@ import math
 
 import gymnasium.spaces as spaces
 from gymnasium.spaces import Sequence
+import gymnasium as gym
 
-def create_sinusoidal_embedding(num_positions, embedding_dim):
+
+
+def create_sinusoidal_embedding(num_positions: int, embedding_dim: int) -> nn.Parameter:
     position = torch.arange(num_positions).unsqueeze(1)  # Shape: (num_positions, 1)
     div_term = torch.exp(torch.arange(0, embedding_dim, 2) * -(math.log(10000.0) / embedding_dim))
     sinusoidal_embedding = torch.zeros(num_positions, embedding_dim)
@@ -17,8 +20,10 @@ def create_sinusoidal_embedding(num_positions, embedding_dim):
     sinusoidal_embedding[:, 1::2] = torch.cos(position * div_term)  # Apply cosine to odd indices
     return nn.Parameter(sinusoidal_embedding, requires_grad=False)
 
+
 class BaseBikkleModel(nn.Module):
-    def __init__(self, observation_space, device, token_size=64, num_attention_heads=4):
+    def __init__(self, observation_space: gym.spaces.Dict, token_size: int = 64,
+                 num_attention_heads: int = 4):
         super(BaseBikkleModel, self).__init__()
 
         num_obs_types = len(observation_space.keys())
@@ -26,16 +31,15 @@ class BaseBikkleModel(nn.Module):
         self.token_size = token_size
 
         # Embedding offsets for observations and actions
-        self.embedding_offsets = nn.Embedding(num_obs_types, token_size, device=device)
+        self.embedding_offsets = nn.Embedding(num_obs_types, token_size)
 
         def make_one_embedding(space):
             if isinstance(space, Sequence):
                 space = space.feature_space
 
             return nn.Sequential(
-                nn.Linear(space.shape[0], token_size, device=device),
-                nn.ReLU(),
-                nn.LayerNorm(token_size, device=device),
+                nn.Linear(space.shape[0], token_size),
+                nn.LayerNorm(token_size),
             )
 
         token_dict = {
@@ -48,9 +52,11 @@ class BaseBikkleModel(nn.Module):
 
         # Self-attention block
         self.self_attention = nn.MultiheadAttention(embed_dim=token_size, num_heads=num_attention_heads,
-                                                    batch_first=True, device=device)
+                                                    batch_first=True)
+        self.post_attention_layer_norm = nn.LayerNorm(token_size)
 
-    def forward(self, observations: dict, embedding_indices: dict, mask: dict):
+    def forward(self, observations: dict[str, torch.Tensor], embedding_indices: dict[str, torch.Tensor],
+                mask: dict[str, torch.Tensor]) -> torch.Tensor:
         """
 
         :param tokens: A tensor of shape (batch_size, num_tokens, token_size) representing the input tokens
@@ -66,7 +72,6 @@ class BaseBikkleModel(nn.Module):
         # Process each observation key
         for i, (key, value) in enumerate(observations.items()):
             token = self.input_mlps[key](value)
-            # token += self.embedding_offsets.weight[i]  # Add embedding offset
             token_list.append(token)
             indices_list.append(embedding_indices[key])
             mask_list.append(mask[key])
@@ -78,17 +83,18 @@ class BaseBikkleModel(nn.Module):
 
         tokens_tensor += self.embedding_offsets(indices_tensor)
 
-        attn_output, _ = self.self_attention(tokens_tensor, tokens_tensor, tokens_tensor, key_padding_mask=mask_tensor)
+        attn_output, attn_weights = self.self_attention(tokens_tensor, tokens_tensor, tokens_tensor, key_padding_mask=mask_tensor, need_weights=True)
+        attn_output = self.post_attention_layer_norm(attn_output)
 
-        # Aggregate tokens (e.g., mean pooling)
-        aggregated_tokens = attn_output.mean(dim=1)  # Shape: (batch_size, token_size)
+        aggregated_tokens = torch.bmm(attn_weights, attn_output)  # Shape: (batch_size, num_tokens, token_size)
+        aggregated_tokens = aggregated_tokens.sum(dim=1)  # Shape: (batch_size, token_size)
 
         return aggregated_tokens
 
 
-
 class BikkleValueFunction(nn.Module):
-    def __init__(self, observation_space, action_space, device, token_size=64, num_attention_heads=4, mlp_hidden_size=128):
+    def __init__(self, observation_space: gym.spaces.Dict, action_space: gym.spaces.Box,
+                 token_size: int = 64, num_attention_heads: int = 4, mlp_hidden_size: int = 128) -> None:
         super(BikkleValueFunction, self).__init__()
 
         assert isinstance(action_space, spaces.Box)
@@ -96,51 +102,24 @@ class BikkleValueFunction(nn.Module):
         observation_space = copy.deepcopy(observation_space)
         observation_space["action"] = action_space
 
-        self.base = BaseBikkleModel(observation_space, device=device, token_size=token_size, num_attention_heads=num_attention_heads)
-        self.base = self.base.to(device)
-
-        # num_obs_types = len(observation_space.keys())
-        #
-        # self.token_size = token_size
-        #
-        # # add one embedding dimension for action
-        # # self.embedding_offsets = create_sinusoidal_embedding(num_obs_types + 1, token_size)
-        # self.embedding_offsets = nn.Embedding(num_obs_types + 1, token_size)
-        #
-        # def make_one_embedding(space):
-        #     return nn.Sequential(
-        #         nn.Linear(space.shape[0], token_size),
-        #         nn.ReLU(),
-        #         nn.LayerNorm(token_size)
-        #     )
-        #
-        # token_dict = {
-        #     key: make_one_embedding(space)
-        #     for key, space in observation_space.items()
-        # }
-        # token_dict["action"] = make_one_embedding(action_space)
-        #
-        # # MLPs for each observation key to map to token size
-        # self.input_mlps = nn.ModuleDict(token_dict)
-        #
-        # # Self-attention block
-        # self.self_attention = nn.MultiheadAttention(embed_dim=token_size, num_heads=num_attention_heads,
-        #                                             batch_first=True)
+        self.base = BaseBikkleModel(observation_space, token_size=token_size,
+                                    num_attention_heads=num_attention_heads)
 
         # Final MLP
         self.mlp = nn.Sequential(
-            nn.Linear(token_size, mlp_hidden_size, device=device),
+            nn.Linear(token_size, mlp_hidden_size),
             nn.ReLU(),
-            nn.Linear(mlp_hidden_size, 1, device=device)  # Single output head
+            nn.LayerNorm(mlp_hidden_size),
+            nn.Linear(mlp_hidden_size, 1)  # Single output head
         )
 
-    def forward(self, observations: dict, action):
+    def forward(self, observations: dict[str, torch.Tensor], action: torch.Tensor) -> torch.Tensor:
         tokens = observations["tokens"]
         indices = observations["indices"]
         mask = observations["mask"]
         tokens["action"] = torch.unsqueeze(action, dim=1)
-        indices["action"] = torch.full((action.shape[0], 1), key_to_idx["action"], dtype=torch.long, device=action.device)
-        mask["action"] = torch.zeros((action.shape[0], 1), dtype=torch.float32, device=action.device)
+        indices["action"] = torch.full((action.shape[0], 1), key_to_idx["action"], dtype=torch.long)
+        mask["action"] = torch.zeros((action.shape[0], 1), dtype=torch.float32)
         aggregated_tokens = self.base(tokens, indices, mask)
 
         output = self.mlp(aggregated_tokens)
@@ -148,55 +127,34 @@ class BikkleValueFunction(nn.Module):
         return output
 
 
+LOG_STD_MAX = 2
+LOG_STD_MIN = -5
+
+
 class BikklePolicy(nn.Module):
-    def __init__(self, observation_space, action_space, device, token_size=64, num_attention_heads=4, mlp_hidden_size=128):
+    def __init__(self, observation_space: gym.spaces.Dict, action_space: gym.spaces.Box,
+                 token_size: int = 64, num_attention_heads: int = 4, mlp_hidden_size: int = 128) -> None:
         super(BikklePolicy, self).__init__()
 
-        self.base = BaseBikkleModel(observation_space, device, token_size=token_size, num_attention_heads=num_attention_heads)
-        self.base = self.base.to(device)
-
-        # num_obs_types = len(observation_space.keys())
-        #
-        # self.token_size = token_size
-        #
-        # # Embedding offsets for observations and actions
-        # self.embedding_offsets = nn.Embedding(num_obs_types, token_size)
-        #
-        # def make_one_embedding(space):
-        #     if isinstance(space, Sequence):
-        #         space = space.feature_space
-        #
-        #     return nn.Sequential(
-        #         nn.Linear(space.shape[0], token_size),
-        #         nn.ReLU(),
-        #         nn.LayerNorm(token_size)
-        #     )
-        #
-        # token_dict = {
-        #     key: make_one_embedding(space)
-        #     for key, space in observation_space.items()
-        # }
-        #
-        # # MLPs for each observation key to map to token size
-        # self.input_mlps = nn.ModuleDict(token_dict)
-        #
-        # # Self-attention block
-        # self.self_attention = nn.MultiheadAttention(embed_dim=token_size, num_heads=num_attention_heads,
-        #                                             batch_first=True)
+        self.base = BaseBikkleModel(observation_space, token_size=token_size,
+                                    num_attention_heads=num_attention_heads)
 
         # Final MLP for Gaussian heads
         self.mean_head = nn.Sequential(
             nn.Linear(token_size, mlp_hidden_size),
             nn.ReLU(),
+            nn.LayerNorm(mlp_hidden_size),
             nn.Linear(mlp_hidden_size, action_space.shape[0])  # Output mean for each action dimension
         )
         self.log_std_head = nn.Sequential(
             nn.Linear(token_size, mlp_hidden_size),
             nn.ReLU(),
+            nn.LayerNorm(mlp_hidden_size),
             nn.Linear(mlp_hidden_size, action_space.shape[0])  # Output log standard deviation for each action dimension
         )
 
-    def forward(self, tokens: dict, indices: dict, mask: dict):
+    def forward(self, tokens: dict[str, torch.Tensor], indices: dict[str, torch.Tensor],
+                mask: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         """
 
         :param tokens: A tensor of shape (batch_size, num_tokens, token_size) representing the input tokens
@@ -211,11 +169,15 @@ class BikklePolicy(nn.Module):
         log_std = self.log_std_head(aggregated_tokens)
 
         # Clamp log_std for numerical stability
-        log_std = torch.clamp(log_std, min=-20, max=2)
+        log_std = torch.clamp(log_std, min=-5, max=2)
+        #
+        # log_std = torch.tanh(log_std)
+        # log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)  # From SpinUp / Denis Yarats
 
         return mean, log_std
 
-    def get_action(self, tokens: dict, indices: dict, mask: dict):
+    def get_action(self, tokens: dict[str, torch.Tensor], indices: dict[str, torch.Tensor],
+                   mask: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mean, log_std = self(tokens, indices, mask)
         std = log_std.exp()
         normal = torch.distributions.Normal(mean, std)
@@ -229,6 +191,7 @@ class BikklePolicy(nn.Module):
         # mean = torch.tanh(mean) * self.action_scale + self.action_bias
         return action, log_prob, mean
 
+
 key_to_idx = {
     "agent_position": 0,
     "cyan": 1,
@@ -237,36 +200,27 @@ key_to_idx = {
     "action": 4,
     "face": 5,
     "eye_tracking": 6,
-    "screen_image": 3 # do not use
+    "screen_image": 3  # do not use
 }
 
-# def preprocess_obs(obs_space: spaces.Dict, observations, action: Optional[torch.Tensor], device):
-#     processed = []
-#     mode_idx = []
-#     for key, val in observations.keys():
-#         if key == "screen_image":  # Skip screen images for this test
-#             continue
-#
-#         if isinstance(obs_space[key], spaces.Sequence):
-#             for val[:]
-#
-#         processed
-#
-#         values = [torch.tensor(obs[key], dtype=torch.float32) for obs in observations]
-#         processed[key] = torch.stack(values).to(device)
-#     return processed, mode_idx
 
+def preprocess_bikkle_observation_with_mask(
+    observation: dict[str, np.ndarray | list | torch.Tensor],
+    observation_space: gym.spaces.Dict,
+    max_blocks: int = 100,
+    device: str = "cpu"
+) -> dict[str, dict[str, torch.Tensor]]:
 
-def preprocess_bikkle_observation_with_mask(observation, observation_space, max_blocks=100, device="cpu"):
     """
-    Preprocesses a BikkleGymEnvironment observation for the Policy model, returning tokens, indices, and a mask.
+    TODO: I'm applying padding to the blocks, but I shouldn't really worry about that, I should apply padding over the
+    whole batch token set instead. I don't have a great way to handle that right now though because I'm stacking up
+    the block tokens across the batch, so they need to be the same length.
 
-    :param observation: The raw observation from the environment.
-    :param observation_space: The observation space of the environment.
-    :param key_to_idx: A dictionary mapping observation keys to embedding indices.
-    :param max_blocks: Maximum number of blocks for sequence spaces (cyan and pink).
-    :param device: The device to which the tensors should be moved.
-    :return: A dictionary with processed tokens, their indices, and a mask.
+    :param observation:
+    :param observation_space:
+    :param max_blocks:
+    :param device:
+    :return:
     """
     tokens = {}
     indices = {}
@@ -286,13 +240,14 @@ def preprocess_bikkle_observation_with_mask(observation, observation_space, max_
             # TODO: right now we're assuming that each block type has the same size, the code is a bit mixed on this
             if isinstance(value, torch.Tensor):
                 tokens[key] = value.to(device)
-                indices[key] = torch.full((value.shape[0], value.shape[1]), key_to_idx[key], dtype=torch.long, device=device)
-                masks[key] = torch.zeros((value.shape[0], value.shape[1]), dtype=torch.float32, device=device)
+                indices[key] = torch.full((value.shape[0], value.shape[1]), key_to_idx[key], dtype=torch.long,
+                                          device=device)
+                masks[key] = torch.zeros((value.shape[0], value.shape[1]), dtype=torch.bool, device=device)
             else:
                 sequence_tensor = [torch.tensor(seq, dtype=torch.float32, device=device) for seq in value]
 
                 # Create a mask for each batch
-                mask = torch.ones((batch_size, max_blocks), dtype=torch.float32, device=device)
+                mask = torch.ones((batch_size, max_blocks), dtype=torch.bool, device=device)
 
                 for i, seq in enumerate(sequence_tensor):
                     length = min(len(seq), max_blocks)
@@ -308,10 +263,12 @@ def preprocess_bikkle_observation_with_mask(observation, observation_space, max_
             if not isinstance(value, (torch.Tensor, list, np.ndarray)):
                 raise TypeError(f"Unexpected type for observation key '{key}': {type(value)}")
 
-            tensor = torch.tensor(value, dtype=torch.float32, device=device) if not isinstance(value, torch.Tensor) else value.to(device)
-            tensor = torch.unsqueeze(tensor, dim=1) # add a token dimension
+            tensor = torch.tensor(value, dtype=torch.float32, device=device) if not isinstance(value,
+                                                                                               torch.Tensor) else value.to(
+                device)
+            tensor = torch.unsqueeze(tensor, dim=1)  # add a token dimension
             tokens[key] = tensor
             indices[key] = torch.full((tensor.shape[0], 1), key_to_idx[key], dtype=torch.long, device=device)
-            masks[key] = torch.ones((tensor.shape[0], 1), dtype=torch.float32, device=device)
+            masks[key] = torch.ones((tensor.shape[0], 1), dtype=torch.bool, device=device)
 
     return {"tokens": tokens, "indices": indices, "mask": masks}
