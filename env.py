@@ -41,7 +41,7 @@ class BikkleGymEnvironment(gym.Env):
             "cyan": Sequence(Box(low=0, high=screen_size, shape=(2,), dtype=np.float32)),  # Variable-length cyan blocks
             "pink": Sequence(Box(low=0, high=screen_size, shape=(2,), dtype=np.float32)),  # Variable-length pink blocks
             "screen_image": Box(low=0, high=255, shape=(screen_size, screen_size, 3), dtype=np.uint8),  # RGB image
-            "steps": Box(low=0, high=round_timeout, shape=(), dtype=np.int32)  # Steps taken in the current round
+            "steps": Box(low=0, high=1., shape=(1,), dtype=np.float32)  # Steps taken in the current round
         })
 
         # Rewards
@@ -143,10 +143,10 @@ class BikkleGymEnvironment(gym.Env):
     def _get_observation(self) -> dict:
         return {
             "agent_position": self.agent_position,
-            "cyan_blocks": self.cyan_blocks,
-            "pink_blocks": self.pink_blocks,
+            "cyan": self.cyan_blocks,
+            "pink": self.pink_blocks,
             "screen_image": self.render(mode="rgb_array"),
-            "steps": self.round_steps_count
+            "steps": np.array([self.round_steps_count/self.round_timeout], dtype=np.float32)
         }
 
     def _is_touching(self, position: np.ndarray, block_position: np.ndarray) -> bool:
@@ -210,5 +210,5 @@ class BikkleGymEnvironment(gym.Env):
 # Register the environment
 gym.envs.registration.register(
     id="BikkleGymEnvironment-v0",
-    entry_point="env.BikkleGymEnvironment",
+    entry_point="env:BikkleGymEnvironment",
 )
