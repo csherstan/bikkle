@@ -1,6 +1,7 @@
 import copy
 from typing import Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 import math
@@ -281,21 +282,33 @@ def preprocess_bikkle_observation_with_mask(observation, observation_space, max_
             batch_size = len(value)
             padded_tensor = torch.zeros((batch_size, max_blocks, feature_space.shape[0]), dtype=torch.float32,
                                         device=device)
-            sequence_tensor = [torch.tensor(seq, dtype=torch.float32, device=device) for seq in value]
 
-            # Create a mask for each batch
-            mask = torch.ones((batch_size, max_blocks), dtype=torch.float32, device=device)
+            # TODO: right now we're assuming that each block type has the same size, the code is a bit mixed on this
+            if isinstance(value, torch.Tensor):
+                tokens[key] = value.to(device)
+                indices[key] = torch.full((value.shape[0], value.shape[1]), key_to_idx[key], dtype=torch.long, device=device)
+                masks[key] = torch.zeros((value.shape[0], value.shape[1]), dtype=torch.float32, device=device)
+            else:
+                sequence_tensor = [torch.tensor(seq, dtype=torch.float32, device=device) for seq in value]
 
-            for i, seq in enumerate(sequence_tensor):
-                length = min(len(seq), max_blocks)
-                padded_tensor[i, :length] = seq[:length]
-                mask[i, :length] = 0  # Mark valid tokens
-            tokens[key] = padded_tensor
-            indices[key] = torch.full((batch_size, max_blocks), key_to_idx[key], dtype=torch.long, device=device)
-            masks[key] = mask
+                # Create a mask for each batch
+                mask = torch.ones((batch_size, max_blocks), dtype=torch.float32, device=device)
+
+                for i, seq in enumerate(sequence_tensor):
+                    length = min(len(seq), max_blocks)
+                    padded_tensor[i, :length] = seq[:length]
+                    mask[i, :length] = 0  # Mark valid tokens
+                tokens[key] = padded_tensor
+                indices[key] = torch.full((batch_size, max_blocks), key_to_idx[key], dtype=torch.long, device=device)
+                masks[key] = mask
         else:
             # Handle fixed-size observations
-            tensor = torch.tensor(value, dtype=torch.float32, device=device)
+            if value is None:
+                raise ValueError(f"Observation key '{key}' has a None value.")
+            if not isinstance(value, (torch.Tensor, list, np.ndarray)):
+                raise TypeError(f"Unexpected type for observation key '{key}': {type(value)}")
+
+            tensor = torch.tensor(value, dtype=torch.float32, device=device) if not isinstance(value, torch.Tensor) else value.to(device)
             tensor = torch.unsqueeze(tensor, dim=1) # add a token dimension
             tokens[key] = tensor
             indices[key] = torch.full((tensor.shape[0], 1), key_to_idx[key], dtype=torch.long, device=device)

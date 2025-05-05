@@ -1,3 +1,5 @@
+from collections import deque
+
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
@@ -29,18 +31,18 @@ class BikkleGymEnvironment(gym.Env):
         self.block_size_pixels = block_size * screen_size
 
         self.round_steps_count = 0  # number of steps taken in the current round
-        self.total_reward = 0.0  # cumulative reward
-        self.steps_since_reset = 0  # total number of steps
+
+        self.recent_rewards = deque(maxlen=1000)  # Sliding window for recent rewards
 
         # Define action space: agent can move in x and y directions
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
 
         # Define observation space
         self.observation_space = Dict({
-            "agent_position": Box(low=0, high=screen_size, shape=(2,), dtype=np.float32),
-            "cyan": Sequence(Box(low=0, high=screen_size, shape=(2,), dtype=np.float32)),  # Variable-length cyan blocks
-            "pink": Sequence(Box(low=0, high=screen_size, shape=(2,), dtype=np.float32)),  # Variable-length pink blocks
-            "screen_image": Box(low=0, high=255, shape=(screen_size, screen_size, 3), dtype=np.uint8),  # RGB image
+            "agent_position": Box(low=0, high=1.0, shape=(2,), dtype=np.float32),
+            "cyan": Sequence(Box(low=0, high=1.0, shape=(2,), dtype=np.float32), stack=True),  # Variable-length cyan blocks
+            "pink": Sequence(Box(low=0, high=1.0, shape=(2,), dtype=np.float32), stack=True),  # Variable-length pink blocks
+            # "screen_image": Box(low=0, high=255, shape=(screen_size, screen_size, 3), dtype=np.uint8),  # RGB image
             "steps": Box(low=0, high=1., shape=(1,), dtype=np.float32)  # Steps taken in the current round
         })
 
@@ -105,8 +107,8 @@ class BikkleGymEnvironment(gym.Env):
         # Increment step count and update total reward
         self.round_steps_count += 1
         self.steps_since_reset += 1
-        self.total_reward += reward
-        average_reward = self.total_reward / self.steps_since_reset
+        self.recent_rewards.append(reward)
+        average_reward = sum(self.recent_rewards) / len(self.recent_rewards)
 
         if self.round_steps_count >= self.round_timeout:
             self._handle_timeout()
@@ -142,10 +144,10 @@ class BikkleGymEnvironment(gym.Env):
 
     def _get_observation(self) -> dict:
         return {
-            "agent_position": self.agent_position,
-            "cyan": self.cyan_blocks,
-            "pink": self.pink_blocks,
-            "screen_image": self.render(mode="rgb_array"),
+            "agent_position": np.array(self.agent_position, dtype=np.float32),
+            "cyan": np.array(self.cyan_blocks, dtype=np.float32),
+            "pink": np.array(self.pink_blocks, dtype=np.float32),
+            # "screen_image": self.render(mode="rgb_array"),
             "steps": np.array([self.round_steps_count/self.round_timeout], dtype=np.float32)
         }
 

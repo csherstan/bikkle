@@ -5,19 +5,17 @@ Original source: https://github.com/pytorch-labs/LeanRL/blob/main/leanrl/sac_con
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/sac/#sac_continuous_actionpy
 import os
 
+from torch.utils._pytree import tree_map
+
 from model import BikklePolicy, preprocess_bikkle_observation_with_mask, BikkleValueFunction
 
 os.environ["TORCHDYNAMO_INLINE_INBUILT_NN_MODULES"] = "1"
 
-import math
+
 import os
-import random
 import time
-from collections import deque
 from dataclasses import dataclass
 
-import gymnasium as gym
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -29,9 +27,11 @@ from tensordict import TensorDict, from_module, from_modules
 from tensordict.nn import CudaGraphModule, TensorDictModule
 
 # from stable_baselines3.common.buffers import ReplayBuffer
-from torchrl.data import LazyTensorStorage, ReplayBuffer, ListStorage
+from torchrl.data import ReplayBuffer, ListStorage
 
 from env import *
+
+torch.set_float32_matmul_precision('high')
 
 
 @dataclass
@@ -233,8 +233,8 @@ if __name__ == "__main__":
         alpha = torch.as_tensor(args.alpha, device=device)
 
     envs.single_observation_space.dtype = np.float32
-    # rb = ReplayBuffer(storage=LazyTensorStorage(args.buffer_size, device=device))
-    rb = ReplayBuffer(storage=ListStorage(args.buffer_size))
+    rb_device = "cpu"
+    rb = ReplayBuffer(storage=ListStorage(args.buffer_size), prefetch=1, batch_size=args.batch_size)
 
 
     def batched_qf(params, obs, action, next_q_value=None):
@@ -247,21 +247,25 @@ if __name__ == "__main__":
 
 
     def update_main(data):
+        data = tree_map(lambda x: x.to(device), data)
         # optimize the model
         q_optimizer.zero_grad()
         with torch.no_grad():
-            preprop_next = preprocess_bikkle_observation_with_mask(data["next_observations"], observation_space=obs_space, max_blocks=args.max_blocks, device=device)
+            preprop_next = preprocess_bikkle_observation_with_mask(data["next_observations"],
+                                                                   observation_space=obs_space,
+                                                                   max_blocks=args.max_blocks, device=device)
             next_state_actions, next_state_log_pi, _ = actor.get_action(**preprop_next)
             qf_next_target = torch.vmap(batched_qf, (0, None, None))(
                 qnet_target, preprop_next, next_state_actions
             )
             min_qf_next_target = qf_next_target.min(dim=0).values - alpha * next_state_log_pi
             next_q_value = data["rewards"].flatten() + (
-                ~data["dones"].flatten()
-            ).float() * args.gamma * min_qf_next_target.view(-1)
+                    1.0 - data["dones"].flatten()) * args.gamma * min_qf_next_target.view(-1)
 
         qf_a_values = torch.vmap(batched_qf, (0, None, None, None))(
-            qnet_params, preprocess_bikkle_observation_with_mask(data["observations"], observation_space=obs_space, max_blocks=args.max_blocks, device=device), data["actions"], next_q_value
+            qnet_params, preprocess_bikkle_observation_with_mask(data["observations"], observation_space=obs_space,
+                                                                 max_blocks=args.max_blocks, device=device),
+            data["actions"], next_q_value
         )
         qf_loss = qf_a_values.sum(0)
 
@@ -271,6 +275,7 @@ if __name__ == "__main__":
 
 
     def update_pol(data):
+        data = tree_map(lambda x: x.to(device), data)
         actor_optimizer.zero_grad()
         preprop = preprocess_bikkle_observation_with_mask(observation=data["observations"],
                                                           observation_space=obs_space,
@@ -300,6 +305,10 @@ if __name__ == "__main__":
         return rb.sample(args.batch_size)
 
 
+    def prep_obs_for_replay_buffer(obs: dict, device):
+        return tree_map(lambda x: torch.as_tensor(x, dtype=torch.float32, device=device), obs)
+
+
     is_extend_compiled = False
     if args.compile:
         mode = None  # "reduce-overhead" if not args.cudagraphs else None
@@ -320,6 +329,7 @@ if __name__ == "__main__":
     max_ep_ret = -float("inf")
     avg_returns = deque(maxlen=20)
     desc = ""
+    avg_reward = 0.0
 
     for global_step in pbar:
         if global_step == args.measure_burnin + args.learning_starts:
@@ -339,7 +349,7 @@ if __name__ == "__main__":
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
-
+        avg_reward = infos["average_reward"]
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if "final_info" in infos:
             for info in infos["final_info"]:
@@ -361,14 +371,13 @@ if __name__ == "__main__":
         #         real_next_obs[idx] = torch.as_tensor(infos["final_observation"][idx], device=device, dtype=torch.float)
         # obs = torch.as_tensor(obs, device=device, dtype=torch.float)
         transition = TensorDict(
-            observations=obs,
-            next_observations=real_next_obs,
-            actions=torch.as_tensor(actions, device=device, dtype=torch.float),
-            rewards=torch.as_tensor(rewards, device=device, dtype=torch.float),
-            terminations=terminations,
-            dones=terminations,
+            observations=prep_obs_for_replay_buffer(obs, device=rb_device),
+            next_observations=prep_obs_for_replay_buffer(real_next_obs, device=rb_device),
+            actions=torch.as_tensor(actions, device=rb_device, dtype=torch.float),
+            rewards=torch.as_tensor(rewards, device=rb_device, dtype=torch.float),
+            terminations=torch.as_tensor(terminations, device=rb_device, dtype=torch.float),
+            dones=torch.as_tensor(terminations, device=rb_device, dtype=torch.float),
             batch_size=1,
-            device=device,
         )
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
@@ -400,6 +409,7 @@ if __name__ == "__main__":
                         "actor_loss": out_main["actor_loss"].mean(),
                         "alpha_loss": out_main.get("alpha_loss", 0),
                         "qf_loss": out_main["qf_loss"].mean(),
+                        "avg_reward": torch.tensor(avg_reward),
                     }
                 wandb.log(
                     {
