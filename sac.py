@@ -4,6 +4,7 @@ Original source: https://github.com/pytorch-labs/LeanRL/blob/main/leanrl/sac_con
 
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/sac/#sac_continuous_actionpy
 import os
+
 os.environ["TORCHDYNAMO_INLINE_INBUILT_NN_MODULES"] = "1"
 from pathlib import Path
 
@@ -59,9 +60,9 @@ class Args:
     """the batch size of sample from the reply memory"""
     learning_starts: int = 5e3
     """timestep to start learning"""
-    policy_lr: float = 3e-4
+    policy_lr: float = 3e-5
     """the learning rate of the policy network optimizer"""
-    q_lr: float = 1e-3
+    q_lr: float = 1e-4
     """the learning rate of the Q network network optimizer"""
     policy_frequency: int = 2
     """the frequency of training policy (delayed)"""
@@ -83,6 +84,7 @@ class Args:
     max_blocks: int = 100
 
     model_save_interval: int = 1000
+    num_envs: int = 1
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -92,7 +94,7 @@ def make_env(env_id, seed, idx, capture_video, run_name):
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
             env = gym.make(env_id)
-            env = gymnasium.wrappers.TimeLimit(env, max_episode_steps=300)
+            env = gym.wrappers.TimeLimit(env, max_episode_steps=150)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.action_space.seed(seed)
         return env
@@ -117,10 +119,12 @@ class Metrics:
     def get_data(self):
         ret_data = {}
         for k, v in self._metrics.items():
+            if k == "actions":
+                mean_action_vector = np.array(v).mean(axis=0)
+                ret_data[k] = np.linalg.norm(mean_action_vector)
             ret_data[k] = np.array(v).mean()
 
         return ret_data
-
 
 
 if __name__ == "__main__":
@@ -146,7 +150,8 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
-    envs = gym.vector.SyncVectorEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name)])
+    envs = gym.vector.SyncVectorEnv(
+        [make_env(args.env_id, args.seed, i, args.capture_video, run_name) for i in range(args.num_envs)])
     obs_space = envs.single_observation_space
     action_space = envs.single_action_space
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
@@ -202,13 +207,15 @@ if __name__ == "__main__":
     def batched_qf(params, obs, action, next_q_value=None):
         with params.to_module(qnet):
             vals = qnet(obs, action)
+            # assert not torch.isnan(vals).any(), "Nan detected in value prediction"
+            # assert not torch.isinf(vals).any(), "Inf detected in value prediction"
             if next_q_value is not None:
                 loss_val = F.mse_loss(vals.view(-1), next_q_value)
                 return loss_val
             return vals
 
 
-    def update_main(data):
+    def update_value_function(data):
         data = tree_map(lambda x: x.to(device), data)
         # optimize the model
         q_optimizer.zero_grad()
@@ -217,26 +224,37 @@ if __name__ == "__main__":
                                                                    observation_space=obs_space,
                                                                    max_blocks=args.max_blocks, device=device)
             next_state_actions, next_state_log_pi, _ = actor.get_action(**preprop_next)
+            for t in qnet_target:
+                batched_qf(t, preprop_next, next_state_actions)
             qf_next_target = torch.vmap(batched_qf, (0, None, None))(
                 qnet_target, preprop_next, next_state_actions
             )
+            assert not torch.isnan(qf_next_target).any(), f"NaN in qf_next_target"
+            assert not torch.isinf(qf_next_target).any(), f"inf in qf_next_target"
             min_qf_next_target = qf_next_target.min(dim=0).values - alpha * next_state_log_pi
             next_q_value = data["rewards"].flatten() + (
-                    1.0 - data["dones"].flatten()) * args.gamma * min_qf_next_target.view(-1)
+                1.0 - data["dones"].flatten()) * args.gamma * min_qf_next_target.view(-1)
 
         qf_a_values = torch.vmap(batched_qf, (0, None, None, None))(
             qnet_params, preprocess_bikkle_observation_with_mask(data["observations"], observation_space=obs_space,
                                                                  max_blocks=args.max_blocks, device=device),
             data["actions"], next_q_value
         )
+
+        assert not torch.isnan(qf_a_values).any(), f"NaN in qf_a_values"
+        assert not torch.isinf(qf_a_values).any(), f"inf in qf_a_values"
+
         qf_loss = qf_a_values.sum(0)
+
+        assert not torch.isnan(qf_loss).any(), f"NaN in qf_loss"
+        assert not torch.isinf(qf_loss).any(), f"Inf in qf_loss"
 
         qf_loss.backward()
         q_optimizer.step()
         return TensorDict(qf_loss=qf_loss.detach())
 
 
-    def update_pol(data):
+    def update_policy(data):
         data = tree_map(lambda x: x.to(device), data)
         actor_optimizer.zero_grad()
         preprop = preprocess_bikkle_observation_with_mask(observation=data["observations"],
@@ -248,6 +266,9 @@ if __name__ == "__main__":
         stddev = log_pi.exp().mean()
         min_qf_pi = qf_pi.min(0).values
         actor_loss = ((alpha * log_pi) - min_qf_pi).mean()
+
+        assert not torch.isnan(actor_loss).any(), f"NaN in actor_loss"
+        assert not torch.isinf(actor_loss).any(), f"Inf in actor_loss"
 
         metrics = {
             "actor_loss": actor_loss.detach(),
@@ -276,25 +297,65 @@ if __name__ == "__main__":
         return rb.sample(args.batch_size)
 
 
-    def prep_obs_for_replay_buffer(obs: dict, device):
-        return tree_map(lambda x: torch.as_tensor(x, dtype=torch.float32, device=device), obs)
+    def prep_obs_for_replay_buffer(obs: dict, num_envs: int, device) -> list:
+        """
+        Unpacks observations from a SyncVectorEnv and prepares them for the replay buffer.
+
+        Args:
+            obs: A dictionary of observations from the environment.
+            device: The device to which the observations should be moved.
+
+        Returns:
+            A list of dictionaries, each corresponding to a single environment's observation.
+        """
+        obs_list = []
+
+        for i in range(num_envs):
+            single_obs = {}
+            for key, value in obs.items():
+                assert num_envs == len(value), "Inconsistent number of environments in observations"
+                single_obs[key] = torch.as_tensor(value[i], dtype=torch.float32, device=device)
+            assert not any(torch.isinf(x).any() for x in single_obs.values()), "Inf detected in observations"
+            assert not any(torch.isnan(x).any() for x in single_obs.values()), "NaN detected in observations"
+            obs_list.append(single_obs)
+
+        return obs_list
+
+
+    def prep_transition_list(num_envs: int, obs, next_obs, actions, rewards, terminations, device):
+        unpacked_obs = prep_obs_for_replay_buffer(obs, num_envs, device)
+        unpacked_next_obs = prep_obs_for_replay_buffer(next_obs, num_envs, device)
+
+        transitions = []
+        for _obs, _next_obs, _actions, _rewards, _terminations in zip(unpacked_obs, unpacked_next_obs,
+                                                                                 actions, rewards, terminations):
+            transitions.append(TensorDict(
+                observations=_obs,
+                next_observations=_next_obs,
+                actions=torch.as_tensor(_actions, device=rb_device, dtype=torch.float32),
+                rewards=torch.as_tensor(_rewards, device=rb_device, dtype=torch.float32),
+                terminations=torch.as_tensor(_terminations, device=rb_device, dtype=torch.float32),
+                dones=torch.as_tensor(_terminations, device=rb_device, dtype=torch.float32),
+                batch_size=None,
+            ))
+
+        return transitions
 
 
     is_extend_compiled = False
     if args.compile:
         mode = None  # "reduce-overhead" if not args.cudagraphs else None
-        update_main = torch.compile(update_main, mode=mode)
-        update_pol = torch.compile(update_pol, mode=mode)
+        update_main = torch.compile(update_value_function, mode=mode)
+        update_pol = torch.compile(update_policy, mode=mode)
         policy = torch.compile(policy, mode=mode)
 
     if args.cudagraphs:
-        update_main = CudaGraphModule(update_main, in_keys=[], out_keys=[])
-        update_pol = CudaGraphModule(update_pol, in_keys=[], out_keys=[])
+        update_main = CudaGraphModule(update_value_function, in_keys=[], out_keys=[])
+        update_pol = CudaGraphModule(update_policy, in_keys=[], out_keys=[])
         # policy = CudaGraphModule(policy)
 
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
-    # obs = torch.as_tensor(obs, device=device, dtype=torch.float)
     pbar = tqdm.tqdm(range(args.total_timesteps))
     start_time = None
     max_ep_ret = -float("inf")
@@ -339,35 +400,29 @@ if __name__ == "__main__":
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
         # next_obs = torch.as_tensor(next_obs, device=device, dtype=torch.float)
 
-        real_next_obs = next_obs
         # TODO: address this -> doesn't actually matter since our env never returns final_observation
+        # real_next_obs = next_obs
         # real_next_obs = next_obs.clone()
         # for idx, trunc in enumerate(truncations):
         #     if trunc:
         #         real_next_obs[idx] = torch.as_tensor(infos["final_observation"][idx], device=device, dtype=torch.float)
         # obs = torch.as_tensor(obs, device=device, dtype=torch.float)
-        transition = TensorDict(
-            observations=prep_obs_for_replay_buffer(obs, device=rb_device),
-            next_observations=prep_obs_for_replay_buffer(real_next_obs, device=rb_device),
-            actions=torch.as_tensor(actions, device=rb_device, dtype=torch.float),
-            rewards=torch.as_tensor(rewards, device=rb_device, dtype=torch.float),
-            terminations=torch.as_tensor(terminations, device=rb_device, dtype=torch.float),
-            dones=torch.as_tensor(terminations, device=rb_device, dtype=torch.float),
-            batch_size=1,
-        )
+
+        transitions = prep_transition_list(num_envs=args.num_envs, obs=obs, next_obs=next_obs, actions=actions,
+                                           rewards=rewards, terminations=terminations, device=rb_device)
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
-        data = extend_and_sample(transition)
+        data = extend_and_sample(transitions)
 
         # ALGO LOGIC: training.
         if global_step > args.learning_starts:
-            out_main = update_main(data)
+            out_main = update_value_function(data)
             if global_step % args.policy_frequency == 0:  # TD 3 Delayed update support
                 for _ in range(
                     args.policy_frequency
                 ):  # compensate for the delay by doing 'actor_update_interval' instead of 1
-                    out_main.update(update_pol(data))
+                    out_main.update(update_policy(data))
 
                     if args.autotune:
                         alpha.copy_(log_alpha.detach().exp())

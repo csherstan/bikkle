@@ -20,6 +20,13 @@ def create_sinusoidal_embedding(num_positions: int, embedding_dim: int) -> nn.Pa
     sinusoidal_embedding[:, 1::2] = torch.cos(position * div_term)  # Apply cosine to odd indices
     return nn.Parameter(sinusoidal_embedding, requires_grad=False)
 
+def assert_is_nan(x: dict[str, torch.Tensor]) -> None:
+    for key, value in x.items():
+        assert not torch.isnan(value).any(), f"Nan detected in {key}"
+
+def assert_is_inf(x: dict[str, torch.Tensor]) -> None:
+    for key, value in x.items():
+        assert not torch.isinf(value).any(), f"Inf detected in {key}"
 
 class BaseBikkleModel(nn.Module):
     def __init__(self, observation_space: gym.spaces.Dict, token_size: int = 64,
@@ -113,16 +120,28 @@ class BikkleValueFunction(nn.Module):
             nn.Linear(mlp_hidden_size, 1)  # Single output head
         )
 
-    def forward(self, observations: dict[str, torch.Tensor], action: torch.Tensor) -> torch.Tensor:
+    def forward(self, observations: dict[str, dict[torch.Tensor]], action: torch.Tensor) -> torch.Tensor:
         tokens = observations["tokens"]
         indices = observations["indices"]
         mask = observations["mask"]
+        # assert_is_nan(tokens)
+        # assert_is_inf(tokens)
+        # assert_is_nan(indices)
+        # assert_is_inf(indices)
+        # assert_is_nan(mask)
+        # assert_is_inf(mask)
+        # assert not torch.isnan(action).any(), "Nan detected in value action"
+        # assert not torch.isinf(action).any(), "Inf detected in value action"
+
         tokens["action"] = torch.unsqueeze(action, dim=1)
-        indices["action"] = torch.full((action.shape[0], 1), key_to_idx["action"], dtype=torch.long)
-        mask["action"] = torch.zeros((action.shape[0], 1), dtype=torch.float32)
+        indices["action"] = torch.full((action.shape[0], 1), key_to_idx["action"], dtype=torch.long, device=action.device)
+        mask["action"] = torch.zeros((action.shape[0], 1), dtype=torch.bool, device=action.device)
         aggregated_tokens = self.base(tokens, indices, mask)
 
         output = self.mlp(aggregated_tokens)
+
+        # assert not torch.isnan(output).any(), "Nan detected in value prediction"
+        # assert not torch.isinf(output).any(), "Inf detected in value prediction"
 
         return output
 
@@ -177,12 +196,19 @@ class BikklePolicy(nn.Module):
         return mean, log_std
 
     def get_action(self, tokens: dict[str, torch.Tensor], indices: dict[str, torch.Tensor],
-                   mask: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                   mask: dict[str, torch.Tensor], greedy: bool=False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mean, log_std = self(tokens, indices, mask)
         std = log_std.exp()
+        assert not torch.isnan(mean).any(), "NaN in mean"
+        assert not torch.isinf(mean).any(), "Inf in mean"
+        assert not torch.isnan(std).any(), "NaN in std"
+        assert not torch.isinf(std).any(), "Inf in std"
         normal = torch.distributions.Normal(mean, std)
         x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
-        action = torch.tanh(x_t)
+        if greedy:
+            action = mean
+        else:
+            action = torch.tanh(x_t)
         # action = y_t * self.action_scale + self.action_bias
         log_prob = normal.log_prob(x_t)
         # Enforcing Action Bound
@@ -256,6 +282,10 @@ def preprocess_bikkle_observation_with_mask(
                 tokens[key] = padded_tensor
                 indices[key] = torch.full((batch_size, max_blocks), key_to_idx[key], dtype=torch.long, device=device)
                 masks[key] = mask
+
+            tokens[key] = tokens[key]*2 - 1.0  # Normalize to [-1, 1]
+            assert not torch.isnan(tokens[key]).any(), f"NaN in tokens for key {key}"
+            assert not torch.isinf(tokens[key]).any(), f"Inf in tokens for key {key}"
         else:
             # Handle fixed-size observations
             if value is None:
@@ -267,8 +297,10 @@ def preprocess_bikkle_observation_with_mask(
                                                                                                torch.Tensor) else value.to(
                 device)
             tensor = torch.unsqueeze(tensor, dim=1)  # add a token dimension
-            tokens[key] = tensor
+            tokens[key] = tensor*2 - 1.0  # Normalize to [-1, 1]
+            assert not torch.isnan(tokens[key]).any(), f"NaN in tokens for key {key}"
+            assert not torch.isinf(tokens[key]).any(), f"Inf in tokens for key {key}"
             indices[key] = torch.full((tensor.shape[0], 1), key_to_idx[key], dtype=torch.long, device=device)
-            masks[key] = torch.ones((tensor.shape[0], 1), dtype=torch.bool, device=device)
+            masks[key] = torch.zeros((tensor.shape[0], 1), dtype=torch.bool, device=device)
 
     return {"tokens": tokens, "indices": indices, "mask": masks}

@@ -1,3 +1,15 @@
+2025-05-06
+- I *think* the overall algorithm is working, but it doesn't seem very efficient in terms of samples. I can see the agent is sort of able to learn to get some pellets, but
+it's not consistent and doesn't seem to differentiate between blue and pink.
+- Next:
+ - Double-check reward structure
+ - Add event based replay buffer
+ - Try speeding up the learning using compile, etc.
+ - Try multiple envs per step.
+ - Add another self-attention block
+ - Rework preprocess_bikkle_observation_with_mask
+
+
 2025-05-05
 
 - Change env to produce variable numbers of each block type. I'm trying to figure out how the data is being handled
@@ -59,3 +71,10 @@ Overfitting:
 
 
 If the model is overfitting to a specific set of observations, it might produce extreme actions for those cases.
+
+
+- At some point today the code just stopped working on the GPU. A hard reboot of the computer resolved the issue.
+
+- Expected before of the action metrics:
+```- the ideal action would always be full speed and we would just control the direction. Actually maybe I should just change
+ the action space to be an angle of travel. It might be easier to debug.

@@ -118,7 +118,8 @@ class BikkleGymEnvironment(gym.Env):
         self._update_screen_image()
 
         # Return step information
-        return self._get_observation(), reward, False, False, {
+        obs = self._get_observation()
+        return obs, reward, False, False, {
             "high_reward_block": self.high_reward_block,
             "average_reward": sum(self.recent_rewards) / max(len(self.recent_rewards), 1),
             "average_action_norm": sum(self.recent_action_norms) / max(len(self.recent_action_norms), 1)

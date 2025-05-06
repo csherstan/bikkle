@@ -8,7 +8,7 @@ import gymnasium as gym
 from sac import make_env
 
 # Load the saved policy model
-model_path = "/home/sherstancraig/work/maincode/data/sac-BikkleGymEnvironment-v0__sac__1__False__False/actor_model_12000.pth"  # Replace with your saved model path
+model_path = "/home/sherstancraig/work/maincode/data/sac-BikkleGymEnvironment-v0__sac__1__False__False__1746500428/actor_model_64000.pth"  # Replace with your saved model path
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Initialize the environment
@@ -18,7 +18,7 @@ obs_space = env.observation_space
 action_space = env.action_space
 
 # Load the policy model
-policy = BikklePolicy(observation_space=obs_space, action_space=action_space, device=device)
+policy = BikklePolicy(observation_space=obs_space, action_space=action_space).to(device)
 policy.load_state_dict(torch.load(model_path, map_location=device))
 policy.eval()
 
@@ -26,13 +26,14 @@ policy.eval()
 obs, _ = envs.reset()
 running = True
 
+count = 0
 while running:
     # Preprocess the observation
     processed_obs = preprocess_bikkle_observation_with_mask(obs, observation_space=obs_space, device=device)
 
     # Get the action from the policy
     with torch.no_grad():
-        action, _, _ = policy.get_action(**processed_obs)
+        action, _, _ = policy.get_action(**processed_obs, greedy=True)
     action = action.cpu().numpy()
 
     # Step the environment
@@ -41,10 +42,14 @@ while running:
     # Render the environment
     env.render(mode="human")
 
+    count += 1
+
     # Check for termination
-    if terminated or truncated:
+    if terminated or truncated or count % 500 == 0:
         print("Episode finished!")
         obs, _ = env.reset()
+        count = 0
+
 
 # Clean up
 env.close()
