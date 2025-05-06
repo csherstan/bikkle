@@ -100,7 +100,10 @@ class BikkleGymEnvironment(gym.Env):
 
         for i, block in enumerate(self.pink_blocks):
             if self._is_touching(self.agent_position, block):
-                reward = self.high_pink_reward if i == self.high_reward_block else self.default_pink_reward
+                reward = self.default_pink_reward
+                if i == self.high_reward_block:
+                    reward = max(reward, self.high_pink_reward*(self.round_timeout - self.round_steps_count)/self.round_timeout)
+
                 self.pink_blocks.pop(i)  # Remove the touched block
                 self.pink_blocks.append(self._generate_new_block())  # Add a new block
                 if i == self.high_reward_block:
