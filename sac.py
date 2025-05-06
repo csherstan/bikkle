@@ -6,9 +6,8 @@ Original source: https://github.com/pytorch-labs/LeanRL/blob/main/leanrl/sac_con
 import os
 
 os.environ["TORCHDYNAMO_INLINE_INBUILT_NN_MODULES"] = "1"
+os.environ["EXCLUDE_TD_FROM_PYTREE"] = "1"
 from pathlib import Path
-
-import gymnasium.wrappers
 
 from torch.utils._pytree import tree_map
 import os
@@ -50,17 +49,13 @@ class Args:
     """the environment id of the task"""
     total_timesteps: int = 1000000
     """total timesteps of the experiments"""
-    buffer_size: int = int(1e6)
-    """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
     tau: float = 0.005
-    """target smoothing coefficient (default: 0.005)"""
-    batch_size: int = 256
-    """the batch size of sample from the reply memory"""
+
     learning_starts: int = 5e3
     """timestep to start learning"""
-    policy_lr: float = 3e-5
+    policy_lr: float = 6e-5
     """the learning rate of the policy network optimizer"""
     q_lr: float = 1e-4
     """the learning rate of the Q network network optimizer"""
@@ -85,6 +80,21 @@ class Args:
 
     model_save_interval: int = 1000
     num_envs: int = 1
+
+    #--------------replay buffers
+    """target smoothing coefficient (default: 0.005)"""
+    buffer_size_default: int = int(1e5)
+    """the replay memory buffer size for the default buffer"""
+    buffer_size_reward: int = int(1e4)
+    """the replay memory buffer size for the reward buffer"""
+    buffer_size_user: int = int(0)
+    """the replay memory buffer size for the user buffer"""
+    samples_from_default: int = 256
+    """number of samples to draw from the default buffer"""
+    samples_from_reward: int = 64
+    """number of samples to draw from the reward buffer"""
+    samples_from_user: int = 0
+    """number of samples to draw from the user buffer"""
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -201,7 +211,9 @@ if __name__ == "__main__":
 
     envs.single_observation_space.dtype = np.float32
     rb_device = "cpu"
-    rb = ReplayBuffer(storage=ListStorage(args.buffer_size), prefetch=1, batch_size=args.batch_size)
+    rb_default = ReplayBuffer(storage=ListStorage(args.buffer_size_default), prefetch=1, batch_size=args.samples_from_default)
+    rb_reward = ReplayBuffer(storage=ListStorage(args.buffer_size_reward), prefetch=1, batch_size=args.samples_from_reward)
+    rb_user = ReplayBuffer(storage=ListStorage(args.buffer_size_user), prefetch=1, batch_size=args.samples_from_user)
 
 
     def batched_qf(params, obs, action, next_q_value=None):
@@ -216,7 +228,6 @@ if __name__ == "__main__":
 
 
     def update_value_function(data):
-        data = tree_map(lambda x: x.to(device), data)
         # optimize the model
         q_optimizer.zero_grad()
         with torch.no_grad():
@@ -255,7 +266,6 @@ if __name__ == "__main__":
 
 
     def update_policy(data):
-        data = tree_map(lambda x: x.to(device), data)
         actor_optimizer.zero_grad()
         preprop = preprocess_bikkle_observation_with_mask(observation=data["observations"],
                                                           observation_space=obs_space,
@@ -292,9 +302,38 @@ if __name__ == "__main__":
         return TensorDict(**metrics)
 
 
-    def extend_and_sample(transition):
-        rb.extend(transition)
-        return rb.sample(args.batch_size)
+    def extend_replay_buffers(transition: dict) -> None:
+
+        for k, v in transition.items():
+            if k == "default":
+                rb_default.extend(v)
+            elif k == "reward":
+                rb_reward.extend(v)
+            elif k == "user":
+                rb_user.extend(v)
+
+    def sample_from_replay_buffers(device) -> TensorDict:
+        samples = []
+        total_sampled = 0
+        if len(rb_reward) > 0:
+            samples_reward = rb_reward.sample(args.samples_from_reward)
+            samples.append(samples_reward)
+            total_sampled += len(samples_reward)
+
+        if len(rb_user) > 0:
+            samples_user = rb_user.sample(args.samples_from_user)
+            samples.append(samples_user)
+            total_sampled += len(samples_user)
+
+        expected_batch_size = args.samples_from_default + args.samples_from_user + args.samples_from_reward
+
+        samples.append(rb_default.sample(expected_batch_size - total_sampled))
+
+        # Combine samples from all buffers
+        combined_samples = TensorDict.cat(samples, dim=0)
+
+        data = tree_map(lambda x: x.to(device), combined_samples)
+        return data
 
 
     def prep_obs_for_replay_buffer(obs: dict, num_envs: int, device) -> list:
@@ -323,6 +362,17 @@ if __name__ == "__main__":
 
 
     def prep_transition_list(num_envs: int, obs, next_obs, actions, rewards, terminations, device):
+        """
+        Unpacks observations from a SyncVectorEnv and prepares them for the replay buffer.
+        :param num_envs:
+        :param obs:
+        :param next_obs:
+        :param actions:
+        :param rewards:
+        :param terminations:
+        :param device:
+        :return:
+        """
         unpacked_obs = prep_obs_for_replay_buffer(obs, num_envs, device)
         unpacked_next_obs = prep_obs_for_replay_buffer(next_obs, num_envs, device)
 
@@ -362,6 +412,7 @@ if __name__ == "__main__":
     avg_returns = deque(maxlen=20)
     desc = ""
     avg_reward = 0.0
+    reward_history = [deque(maxlen=20) for _ in range(args.num_envs)]
 
     metrics = Metrics()
 
@@ -411,9 +462,20 @@ if __name__ == "__main__":
         transitions = prep_transition_list(num_envs=args.num_envs, obs=obs, next_obs=next_obs, actions=actions,
                                            rewards=rewards, terminations=terminations, device=rb_device)
 
+        non_zero_indices = np.nonzero(rewards)[0].tolist()
+        for env_idx in range(args.num_envs):
+            reward_history[env_idx].append(transitions[env_idx])
+
+            if rewards[env_idx] != 0:
+                extend_replay_buffers({"reward": list(reward_history[env_idx])})
+
+            if terminations[env_idx] or truncations[env_idx]:
+                reward_history[env_idx].clear()
+
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
-        data = extend_and_sample(transitions)
+        extend_replay_buffers({"default": transitions})
+        data = sample_from_replay_buffers(device)
 
         # ALGO LOGIC: training.
         if global_step > args.learning_starts:
