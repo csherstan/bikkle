@@ -10,9 +10,9 @@ from gymnasium.spaces import Sequence, Box, Dict
 
 
 class BikkleGymEnvironment(gym.Env):
-    def __init__(self, default_pink_reward: float = 1.0, high_pink_reward: float = 10.0, cyan_penalty: float = -1.0,
+    def __init__(self, default_pink_reward: float = 1.0, high_pink_reward: float = 100.0, cyan_penalty: float = -1.0,
                  screen_size: int = 600, num_blocks: int = 20, round_timeout: int = 100, max_action_size: float = 0.01,
-                 block_size: float = 0.02) -> None:
+                 block_size: float = 0.04) -> None:
         super().__init__()
 
         assert block_size < 1.0
@@ -95,7 +95,7 @@ class BikkleGymEnvironment(gym.Env):
             if self._is_touching(self.agent_position, block):
                 reward = self.cyan_penalty
                 self.cyan_blocks.pop(i)  # Remove the touched block
-                self.cyan_blocks.append(self._generate_new_block())  # Add a new block
+                self.cyan_blocks.append(self._generate_new_block(self.pink_blocks + self.cyan_blocks))  # Add a new block
                 break
 
         for i, block in enumerate(self.pink_blocks):
@@ -105,7 +105,7 @@ class BikkleGymEnvironment(gym.Env):
                     reward = max(reward, self.high_pink_reward*(self.round_timeout - self.round_steps_count)/self.round_timeout)
 
                 self.pink_blocks.pop(i)  # Remove the touched block
-                self.pink_blocks.append(self._generate_new_block())  # Add a new block
+                self.pink_blocks.append(self._generate_new_block(self.pink_blocks + self.cyan_blocks))  # Add a new block
                 if i == self.high_reward_block:
                     self.high_reward_block = random.choice(range(len(self.pink_blocks)))
                 break
@@ -132,21 +132,20 @@ class BikkleGymEnvironment(gym.Env):
         cyan_blocks = []
         pink_blocks = []
         while len(cyan_blocks) + len(pink_blocks) < self.num_blocks:
-            new_block = self._generate_new_block()
+            new_block = self._generate_new_block(cyan_blocks + pink_blocks)
             if len(cyan_blocks) < self.num_blocks // 2:
                 cyan_blocks.append(new_block)
             else:
                 pink_blocks.append(new_block)
         return cyan_blocks, pink_blocks
 
-    def _generate_new_block(self) -> list[float]:
+    def _generate_new_block(self, existing) -> list[float]:
         while True:
             x, y = np.random.uniform(0, 1, size=2)  # Normalized block position
             new_block = [x, y]
             # Ensure the new block does not overlap with existing blocks
             if all(not self._is_touching(np.array(new_block, dtype=np.float32), np.array(block, dtype=np.float32)) for
-                   block in
-                   (self.cyan_blocks + self.pink_blocks)):
+                   block in existing):
                 return new_block
 
     def _get_observation(self) -> dict:
