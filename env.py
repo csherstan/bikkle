@@ -42,8 +42,8 @@ class BikkleGymEnvironment(gym.Env):
         # Define observation space
         self.observation_space = Dict({
             "agent_position": Box(low=0, high=1.0, shape=(2,), dtype=np.float32),
-            "cyan": Sequence(Box(low=0, high=1.0, shape=(2,), dtype=np.float32), stack=True),  # Variable-length cyan blocks
-            "pink": Sequence(Box(low=0, high=1.0, shape=(2,), dtype=np.float32), stack=True),  # Variable-length pink blocks
+            "cyan": Sequence(Box(low=-1, high=1.0, shape=(2,), dtype=np.float32), stack=True),  # Variable-length cyan blocks
+            "pink": Sequence(Box(low=-1, high=1.0, shape=(2,), dtype=np.float32), stack=True),  # Variable-length pink blocks
             # "screen_image": Box(low=0, high=255, shape=(screen_size, screen_size, 3), dtype=np.uint8),  # RGB image
             "steps": Box(low=0, high=1., shape=(1,), dtype=np.float32)  # Steps taken in the current round
         })
@@ -151,10 +151,11 @@ class BikkleGymEnvironment(gym.Env):
                 return new_block[0]
 
     def _get_observation(self) -> dict:
+        agent_position = np.array(self.agent_position, dtype=np.float32)
         return {
-            "agent_position": np.array(self.agent_position, dtype=np.float32),
-            "cyan": np.array(self.cyan_blocks, dtype=np.float32),
-            "pink": np.array(self.pink_blocks, dtype=np.float32),
+            "agent_position": agent_position,
+            "cyan": np.array(self.cyan_blocks, dtype=np.float32) - agent_position,
+            "pink": np.array(self.pink_blocks, dtype=np.float32) - agent_position,
             # "screen_image": self.render(mode="rgb_array"),
             "steps": np.array([self.round_steps_count/self.round_timeout], dtype=np.float32)
         }
@@ -231,7 +232,7 @@ class FlatBikkleGymEnvironmentWrapper(ObservationWrapper):
             obs_space["agent_position"].shape[0]
             + obs_space["cyan"].feature_space.shape[0]*env.num_blocks//2
             + obs_space["pink"].feature_space.shape[0]*env.num_blocks//2
-            + obs_space["steps"].shape[0]
+            # + obs_space["steps"].shape[0]
         )
         self.observation_space = spaces.Box(
             low=0, high=1, shape=(total_dim,), dtype=np.float32
@@ -241,8 +242,8 @@ class FlatBikkleGymEnvironmentWrapper(ObservationWrapper):
         agent_position = observation["agent_position"].flatten()
         cyan = observation["cyan"].flatten()
         pink = observation["pink"].flatten()
-        steps = observation["steps"].flatten()
-        return np.concatenate([agent_position, cyan, pink, steps])
+        # steps = observation["steps"].flatten()
+        return np.concatenate([agent_position, cyan, pink])
 
 
 def generate_flat_bikkle_env(*args, **kwargs) ->  gym.Env:
