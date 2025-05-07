@@ -13,14 +13,14 @@ from gymnasium.wrappers import TimeLimit
 class BikkleGymEnvironment(gym.Env):
     def __init__(self, default_pink_reward: float = 1.0, high_pink_reward: float = 100.0, cyan_penalty: float = -1.0,
                  screen_size: int = 600, num_blocks: int = 20, round_timeout: int = 100, max_action_size: float = 0.01,
-                 block_size: float = 0.01) -> None:
+                 block_size: float = 0.02) -> None:
         super().__init__()
 
         assert block_size < 1.0
         assert max_action_size < 1.0
 
-        self.cyan_blocks = []
-        self.pink_blocks = []
+        self.cyan_blocks = np.empty((num_blocks//2, 2), dtype=np.float32)
+        self.pink_blocks = np.empty((num_blocks//2, 2), dtype=np.float32)
 
         # Environment parameters
         self.screen_size = screen_size
@@ -64,8 +64,7 @@ class BikkleGymEnvironment(gym.Env):
         self.cyan_blocks, self.pink_blocks = self._generate_blocks()
         while True:
             self.agent_position = np.random.uniform(low=0, high=1, size=2)  # Normalized position
-            if all(not self._is_touching(self.agent_position, np.array(block)) for block in
-                   (self.cyan_blocks + self.pink_blocks)):
+            if not np.any(self._is_touching(self.agent_position, np.vstack((self.cyan_blocks, self.pink_blocks)))):
                 break
 
         self.high_reward_block = random.choice(range(len(self.pink_blocks)))
@@ -93,26 +92,29 @@ class BikkleGymEnvironment(gym.Env):
 
         pink_touched = 0
         cyan_touched = 0
-        # Check for collisions and calculate reward
-        reward = 0.
-        for i, block in enumerate(self.cyan_blocks):
-            if self._is_touching(self.agent_position, block):
-                cyan_touched += 1
-                reward = self.cyan_penalty
-                self.cyan_blocks.pop(i)  # Remove the touched block
-                self.cyan_blocks.append(self._generate_new_block(self.pink_blocks + self.cyan_blocks))  # Add a new block
+        reward = 0.0
 
-        for i, block in enumerate(self.pink_blocks):
-            if self._is_touching(self.agent_position, block):
-                pink_touched += 1
-                reward = self.default_pink_reward
+        # Check for collisions with cyan blocks
+        cyan_hits = self._is_touching(self.agent_position, self.cyan_blocks)
+        if np.any(cyan_hits):
+            cyan_touched = np.sum(cyan_hits)
+            reward += self.cyan_penalty*cyan_touched
+            self.cyan_blocks = np.vstack([
+                self.cyan_blocks[~cyan_hits],
+                np.array([self._generate_new_block(np.vstack((self.cyan_blocks, self.pink_blocks))) for _ in range(cyan_touched)])
+            ])
 
-                self.pink_blocks.pop(i)  # Remove the touched block
-                self.pink_blocks.append(self._generate_new_block(self.pink_blocks + self.cyan_blocks))  # Add a new block
+        # Check for collisions with pink blocks
+        pink_hits = self._is_touching(self.agent_position, self.pink_blocks)
+        if np.any(pink_hits):
+            pink_touched = np.sum(pink_hits)
+            for i in np.where(pink_hits)[0]:
+                self.pink_blocks[i] = self._generate_new_block(np.vstack((self.cyan_blocks, self.pink_blocks)))
                 if i == self.high_reward_block:
-                    reward = max(reward, self.high_pink_reward * (
-                            self.round_timeout - self.round_steps_count) / self.round_timeout)
+                    reward += max(self.default_pink_reward, self.high_pink_reward * (self.round_timeout - self.round_steps_count) / self.round_timeout)
                     self.high_reward_block = random.choice(range(len(self.pink_blocks)))
+                else:
+                    reward += self.default_pink_reward
 
         # Increment step count and update total reward
         self.round_steps_count += 1
@@ -122,7 +124,7 @@ class BikkleGymEnvironment(gym.Env):
         if self.round_steps_count >= self.round_timeout:
             self._handle_timeout()
 
-        # self._update_screen_image()
+        self._update_screen_image()
 
         # Return step information
         obs = self._get_observation()
@@ -134,25 +136,19 @@ class BikkleGymEnvironment(gym.Env):
             "cyan_touched": cyan_touched,
         }
 
-    def _generate_blocks(self) -> tuple[list[list[float]], list[list[float]]]:
-        cyan_blocks = []
-        pink_blocks = []
-        while len(cyan_blocks) + len(pink_blocks) < self.num_blocks:
-            new_block = self._generate_new_block(cyan_blocks + pink_blocks)
-            if len(cyan_blocks) < self.num_blocks // 2:
-                cyan_blocks.append(new_block)
-            else:
-                pink_blocks.append(new_block)
-        return cyan_blocks, pink_blocks
+    def _generate_blocks(self) -> tuple[np.ndarray, np.ndarray]:
+        all_blocks = []
+        while len(all_blocks) < self.num_blocks:
+            new_block = self._generate_new_block(np.array(all_blocks, dtype=np.float32))
+            all_blocks.append(new_block)
+        all_blocks = np.array(all_blocks, dtype=np.float32)
+        return all_blocks[:self.num_blocks // 2], all_blocks[self.num_blocks // 2:]
 
-    def _generate_new_block(self, existing) -> list[float]:
+    def _generate_new_block(self, existing: np.ndarray) -> np.ndarray:
         while True:
-            x, y = np.random.uniform(0, 1, size=2)  # Normalized block position
-            new_block = [x, y]
-            # Ensure the new block does not overlap with existing blocks
-            if all(not self._is_touching(np.array(new_block, dtype=np.float32), np.array(block, dtype=np.float32)) for
-                   block in existing):
-                return new_block
+            new_block = np.random.uniform(0, 1, size=(1, 2)).astype(np.float32)
+            if len(existing) == 0 or not np.any(np.linalg.norm(existing - new_block, axis=1) <= self.block_size * 2):
+                return new_block[0]
 
     def _get_observation(self) -> dict:
         return {
@@ -163,8 +159,8 @@ class BikkleGymEnvironment(gym.Env):
             "steps": np.array([self.round_steps_count/self.round_timeout], dtype=np.float32)
         }
 
-    def _is_touching(self, position: np.ndarray, block_position: np.ndarray) -> bool:
-        return np.linalg.norm(position - block_position) <= self.block_size*2  # Collision threshold
+    def _is_touching(self, position: np.ndarray, blocks: np.ndarray) -> np.ndarray:
+        return np.linalg.norm(blocks - position, axis=1) <= self.block_size * 2
 
     def _update_screen_image(self) -> None:
         if self.window is None:
