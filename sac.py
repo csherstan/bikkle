@@ -25,7 +25,8 @@ from tensordict import TensorDict, from_module, from_modules
 from tensordict.nn import CudaGraphModule, TensorDictModule
 
 from torchrl.data import ReplayBuffer, ListStorage
-from model import BikklePolicy, preprocess_bikkle_observation_with_mask, BikkleValueFunction
+from model import BikklePolicy, preprocess_bikkle_observation_with_mask, BikkleValueFunction, SimplePolicy, \
+    SimpleValueFunction
 from env import *
 
 torch.set_float32_matmul_precision('high')
@@ -55,7 +56,7 @@ class Args:
 
     learning_starts: int = 5e3
     """timestep to start learning"""
-    policy_lr: float = 6e-5
+    policy_lr: float = 3e-5
     """the learning rate of the policy network optimizer"""
     q_lr: float = 1e-4
     """the learning rate of the Q network network optimizer"""
@@ -76,12 +77,12 @@ class Args:
     measure_burnin: int = 3
     """Number of burn-in iterations for speed measure."""
 
-    max_blocks: int = 100
+    max_blocks: int = 2
 
     model_save_interval: int = 1000
     num_envs: int = 1
 
-    #--------------replay buffers
+    # --------------replay buffers
     """target smoothing coefficient (default: 0.005)"""
     buffer_size_default: int = int(1e5)
     """the replay memory buffer size for the default buffer"""
@@ -103,7 +104,7 @@ def make_env(env_id, seed, idx, capture_video, run_name):
             env = gym.make(env_id, render_mode="rgb_array")
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
-            env = gym.make(env_id)
+            env = gym.make(env_id, num_blocks=2)
             env = gym.wrappers.TimeLimit(env, max_episode_steps=150)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.action_space.seed(seed)
@@ -132,7 +133,9 @@ class Metrics:
             if k == "actions":
                 mean_action_vector = np.array(v).mean(axis=0)
                 ret_data[k] = np.linalg.norm(mean_action_vector)
-            ret_data[k] = np.array(v).mean()
+                ret_data[k] = np.array(v).mean()
+            elif k in ["cyan_touched", "pink_touched"]:
+                ret_data[k] = np.sum(v)
 
         return ret_data
 
@@ -171,10 +174,16 @@ if __name__ == "__main__":
     # actor = Actor(envs, device=device, n_act=n_act, n_obs=n_obs)
     # actor_detach = Actor(envs, device=device, n_act=n_act, n_obs=n_obs)
 
-    actor = BikklePolicy(observation_space=obs_space,
-                         action_space=action_space).to(device)
-    actor_detach = BikklePolicy(observation_space=obs_space,
-                                action_space=action_space).to(device)
+    # actor = BikklePolicy(observation_space=obs_space,
+    #                      action_space=action_space).to(device)
+    # actor_detach = BikklePolicy(observation_space=obs_space,
+    #                             action_space=action_space).to(device)
+
+    num_pink = num_cyan = args.max_blocks // 2
+    actor = SimplePolicy(observation_space=obs_space, action_space=action_space, num_cyan=num_cyan,
+                         num_pink=num_pink).to(device)
+    actor_detach = SimplePolicy(observation_space=obs_space, action_space=action_space, num_cyan=num_cyan,
+                                num_pink=num_pink).to(device)
 
     # Copy params to actor_detach without grad
     from_module(actor).data.to_module(actor_detach)
@@ -182,13 +191,19 @@ if __name__ == "__main__":
 
 
     def get_q_params():
-        qf1 = BikkleValueFunction(observation_space=obs_space, action_space=action_space).to(device)
-        qf2 = BikkleValueFunction(observation_space=obs_space, action_space=action_space).to(device)
+        # qf1 = BikkleValueFunction(observation_space=obs_space, action_space=action_space).to(device)
+        # qf2 = BikkleValueFunction(observation_space=obs_space, action_space=action_space).to(device)
+        qf1 = SimpleValueFunction(observation_space=obs_space, action_space=action_space, num_cyan=num_cyan,
+                                  num_pink=num_pink).to(device)
+        qf2 = SimpleValueFunction(observation_space=obs_space, action_space=action_space, num_cyan=num_cyan,
+                                  num_pink=num_pink).to(device)
         qnet_params = from_modules(qf1, qf2, as_module=True)
         qnet_target = qnet_params.data.clone()
 
         # discard params of net
-        qnet = BikkleValueFunction(observation_space=obs_space, action_space=action_space).to("meta")
+        # qnet = BikkleValueFunction(observation_space=obs_space, action_space=action_space).to("meta")
+        qnet = SimpleValueFunction(observation_space=obs_space, action_space=action_space, num_cyan=num_cyan,
+                                   num_pink=num_pink).to("meta")
         qnet_params.to_module(qnet)
 
         return qnet_params, qnet_target, qnet
@@ -211,8 +226,10 @@ if __name__ == "__main__":
 
     envs.single_observation_space.dtype = np.float32
     rb_device = "cpu"
-    rb_default = ReplayBuffer(storage=ListStorage(args.buffer_size_default), prefetch=1, batch_size=args.samples_from_default)
-    rb_reward = ReplayBuffer(storage=ListStorage(args.buffer_size_reward), prefetch=1, batch_size=args.samples_from_reward)
+    rb_default = ReplayBuffer(storage=ListStorage(args.buffer_size_default), prefetch=1,
+                              batch_size=args.samples_from_default)
+    rb_reward = ReplayBuffer(storage=ListStorage(args.buffer_size_reward), prefetch=1,
+                             batch_size=args.samples_from_reward)
     rb_user = ReplayBuffer(storage=ListStorage(args.buffer_size_user), prefetch=1, batch_size=args.samples_from_user)
 
 
@@ -227,58 +244,50 @@ if __name__ == "__main__":
             return vals
 
 
-    def update_value_function(data):
+    def update_value_function(obs, next_obs, actions, rewards, dones):
         # optimize the model
         q_optimizer.zero_grad()
         with torch.no_grad():
-            preprop_next = preprocess_bikkle_observation_with_mask(data["next_observations"],
-                                                                   observation_space=obs_space,
-                                                                   max_blocks=args.max_blocks, device=device)
-            next_state_actions, next_state_log_pi, _ = actor.get_action(**preprop_next)
-            for t in qnet_target:
-                batched_qf(t, preprop_next, next_state_actions)
+            next_state_actions, next_state_log_pi, _ = actor.get_action(**next_obs)
             qf_next_target = torch.vmap(batched_qf, (0, None, None))(
-                qnet_target, preprop_next, next_state_actions
+                qnet_target, next_obs, next_state_actions
             )
-            assert not torch.isnan(qf_next_target).any(), f"NaN in qf_next_target"
-            assert not torch.isinf(qf_next_target).any(), f"inf in qf_next_target"
+            # assert not torch.isnan(qf_next_target).any(), f"NaN in qf_next_target"
+            # assert not torch.isinf(qf_next_target).any(), f"inf in qf_next_target"
             min_qf_next_target = qf_next_target.min(dim=0).values - alpha * next_state_log_pi
-            next_q_value = data["rewards"].flatten() + (
-                1.0 - data["dones"].flatten()) * args.gamma * min_qf_next_target.view(-1)
+            next_q_value = rewards.flatten() + (
+                1.0 - dones.flatten()) * args.gamma * min_qf_next_target.view(-1)
 
         qf_a_values = torch.vmap(batched_qf, (0, None, None, None))(
-            qnet_params, preprocess_bikkle_observation_with_mask(data["observations"], observation_space=obs_space,
-                                                                 max_blocks=args.max_blocks, device=device),
-            data["actions"], next_q_value
+            qnet_params, obs, actions, next_q_value
         )
 
-        assert not torch.isnan(qf_a_values).any(), f"NaN in qf_a_values"
-        assert not torch.isinf(qf_a_values).any(), f"inf in qf_a_values"
+        # assert not torch.isnan(qf_a_values).any(), f"NaN in qf_a_values"
+        # assert not torch.isinf(qf_a_values).any(), f"inf in qf_a_values"
 
         qf_loss = qf_a_values.sum(0)
 
-        assert not torch.isnan(qf_loss).any(), f"NaN in qf_loss"
-        assert not torch.isinf(qf_loss).any(), f"Inf in qf_loss"
+        # assert not torch.isnan(qf_loss).any(), f"NaN in qf_loss"
+        # assert not torch.isinf(qf_loss).any(), f"Inf in qf_loss"
 
         qf_loss.backward()
         q_optimizer.step()
         return TensorDict(qf_loss=qf_loss.detach())
 
 
-    def update_policy(data):
+    def update_policy(obs):
         actor_optimizer.zero_grad()
-        preprop = preprocess_bikkle_observation_with_mask(observation=data["observations"],
-                                                          observation_space=obs_space,
-                                                          max_blocks=args.max_blocks,
-                                                          device=device)
-        pi, log_pi, _ = actor.get_action(**preprop)
-        qf_pi = torch.vmap(batched_qf, (0, None, None))(qnet_params.data, preprop, pi)
+        pi, log_pi, _ = actor.get_action(**obs)
+        qf_pi = torch.vmap(batched_qf, (0, None, None))(qnet_params.data, obs, pi)
         stddev = log_pi.exp().mean()
         min_qf_pi = qf_pi.min(0).values
         actor_loss = ((alpha * log_pi) - min_qf_pi).mean()
 
-        assert not torch.isnan(actor_loss).any(), f"NaN in actor_loss"
-        assert not torch.isinf(actor_loss).any(), f"Inf in actor_loss"
+        # assert not torch.isnan(actor_loss).any(), f"NaN in actor_loss"
+        # assert not torch.isinf(actor_loss).any(), f"Inf in actor_loss"
+
+        actor_loss.backward()
+        actor_optimizer.step()
 
         metrics = {
             "actor_loss": actor_loss.detach(),
@@ -286,13 +295,10 @@ if __name__ == "__main__":
             "stddev": stddev.detach(),
         }
 
-        actor_loss.backward()
-        actor_optimizer.step()
-
         if args.autotune:
             a_optimizer.zero_grad()
             with torch.no_grad():
-                _, log_pi, _ = actor.get_action(**preprop)
+                _, log_pi, _ = actor.get_action(**obs)
                 stddev = log_pi.exp().mean()  # Calculate the mean stddev
             alpha_loss = (-log_alpha.exp() * (log_pi + target_entropy)).mean()
             metrics["alpha_loss"] = alpha_loss.detach()
@@ -311,6 +317,7 @@ if __name__ == "__main__":
                 rb_reward.extend(v)
             elif k == "user":
                 rb_user.extend(v)
+
 
     def sample_from_replay_buffers(device) -> TensorDict:
         samples = []
@@ -378,7 +385,7 @@ if __name__ == "__main__":
 
         transitions = []
         for _obs, _next_obs, _actions, _rewards, _terminations in zip(unpacked_obs, unpacked_next_obs,
-                                                                                 actions, rewards, terminations):
+                                                                      actions, rewards, terminations):
             transitions.append(TensorDict(
                 observations=_obs,
                 next_observations=_next_obs,
@@ -395,13 +402,13 @@ if __name__ == "__main__":
     is_extend_compiled = False
     if args.compile:
         mode = None  # "reduce-overhead" if not args.cudagraphs else None
-        update_main = torch.compile(update_value_function, mode=mode)
-        update_pol = torch.compile(update_policy, mode=mode)
+        update_value_function = torch.compile(update_value_function, mode=mode)
+        update_policy = torch.compile(update_policy, mode=mode)
         policy = torch.compile(policy, mode=mode)
 
     if args.cudagraphs:
-        update_main = CudaGraphModule(update_value_function, in_keys=[], out_keys=[])
-        update_pol = CudaGraphModule(update_policy, in_keys=[], out_keys=[])
+        update_value_function = CudaGraphModule(update_value_function, in_keys=[], out_keys=[])
+        update_policy = CudaGraphModule(update_policy, in_keys=[], out_keys=[])
         # policy = CudaGraphModule(policy)
 
     # TRY NOT TO MODIFY: start the game
@@ -434,9 +441,15 @@ if __name__ == "__main__":
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
-        # avg_reward = infos["average_reward"]
-        # avg_action_norm = infos["average_action_norm"]
-        metrics.add({"actions": actions, "rewards": rewards, "actions_norm": np.linalg.norm(actions)})
+        metrics.add({"actions": actions,
+                     "rewards": rewards,
+                     "actions_norm": np.linalg.norm(actions),
+                     })
+        if "pink_touched" in infos:
+            metrics.add({"pink_touched": infos["pink_touched"]})
+
+        if "cyan_touched" in infos:
+            metrics.add({"cyan_touched": infos["cyan_touched"]})
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if "final_info" in infos:
@@ -462,7 +475,6 @@ if __name__ == "__main__":
         transitions = prep_transition_list(num_envs=args.num_envs, obs=obs, next_obs=next_obs, actions=actions,
                                            rewards=rewards, terminations=terminations, device=rb_device)
 
-        non_zero_indices = np.nonzero(rewards)[0].tolist()
         for env_idx in range(args.num_envs):
             reward_history[env_idx].append(transitions[env_idx])
 
@@ -479,12 +491,23 @@ if __name__ == "__main__":
 
         # ALGO LOGIC: training.
         if global_step > args.learning_starts:
-            out_main = update_value_function(data)
+
+            pp_obs = preprocess_bikkle_observation_with_mask(data["observations"],
+                                                          observation_space=obs_space,
+                                                          max_blocks=args.max_blocks,
+                                                          device=device)
+            pp_next_obs = preprocess_bikkle_observation_with_mask(data["next_observations"],
+                                                               observation_space=obs_space,
+                                                               max_blocks=args.max_blocks,
+                                                               device=device)
+            out_main = update_value_function(obs=pp_obs, next_obs=pp_next_obs, actions=data["actions"],
+                                             rewards=data["rewards"], dones=data["dones"])
+
             if global_step % args.policy_frequency == 0:  # TD 3 Delayed update support
                 for _ in range(
                     args.policy_frequency
                 ):  # compensate for the delay by doing 'actor_update_interval' instead of 1
-                    out_main.update(update_policy(data))
+                    out_main.update(update_policy(pp_obs))
 
                     if args.autotune:
                         alpha.copy_(log_alpha.detach().exp())

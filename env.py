@@ -1,18 +1,19 @@
 from collections import deque
 
 import gymnasium as gym
-from gymnasium import spaces
+from gymnasium import spaces, ObservationWrapper
 import numpy as np
 import random
 import pygame
 
 from gymnasium.spaces import Sequence, Box, Dict
+from gymnasium.wrappers import TimeLimit
 
 
 class BikkleGymEnvironment(gym.Env):
     def __init__(self, default_pink_reward: float = 1.0, high_pink_reward: float = 100.0, cyan_penalty: float = -1.0,
                  screen_size: int = 600, num_blocks: int = 20, round_timeout: int = 100, max_action_size: float = 0.01,
-                 block_size: float = 0.04) -> None:
+                 block_size: float = 0.01) -> None:
         super().__init__()
 
         assert block_size < 1.0
@@ -89,26 +90,29 @@ class BikkleGymEnvironment(gym.Env):
         self.recent_action_norms.append(action_norm)  # Track the action norm
         self.agent_position = np.clip(self.agent_position, 0, 1.0)
 
+
+        pink_touched = 0
+        cyan_touched = 0
         # Check for collisions and calculate reward
         reward = 0.
         for i, block in enumerate(self.cyan_blocks):
             if self._is_touching(self.agent_position, block):
+                cyan_touched += 1
                 reward = self.cyan_penalty
                 self.cyan_blocks.pop(i)  # Remove the touched block
                 self.cyan_blocks.append(self._generate_new_block(self.pink_blocks + self.cyan_blocks))  # Add a new block
-                break
 
         for i, block in enumerate(self.pink_blocks):
             if self._is_touching(self.agent_position, block):
+                pink_touched += 1
                 reward = self.default_pink_reward
-                if i == self.high_reward_block:
-                    reward = max(reward, self.high_pink_reward*(self.round_timeout - self.round_steps_count)/self.round_timeout)
 
                 self.pink_blocks.pop(i)  # Remove the touched block
                 self.pink_blocks.append(self._generate_new_block(self.pink_blocks + self.cyan_blocks))  # Add a new block
                 if i == self.high_reward_block:
+                    reward = max(reward, self.high_pink_reward * (
+                            self.round_timeout - self.round_steps_count) / self.round_timeout)
                     self.high_reward_block = random.choice(range(len(self.pink_blocks)))
-                break
 
         # Increment step count and update total reward
         self.round_steps_count += 1
@@ -118,14 +122,16 @@ class BikkleGymEnvironment(gym.Env):
         if self.round_steps_count >= self.round_timeout:
             self._handle_timeout()
 
-        self._update_screen_image()
+        # self._update_screen_image()
 
         # Return step information
         obs = self._get_observation()
         return obs, reward, False, False, {
             "high_reward_block": self.high_reward_block,
             "average_reward": sum(self.recent_rewards) / max(len(self.recent_rewards), 1),
-            "average_action_norm": sum(self.recent_action_norms) / max(len(self.recent_action_norms), 1)
+            "average_action_norm": sum(self.recent_action_norms) / max(len(self.recent_action_norms), 1),
+            "pink_touched": pink_touched,
+            "cyan_touched": cyan_touched,
         }
 
     def _generate_blocks(self) -> tuple[list[list[float]], list[list[float]]]:
@@ -219,4 +225,35 @@ class BikkleGymEnvironment(gym.Env):
 gym.envs.registration.register(
     id="BikkleGymEnvironment-v0",
     entry_point="env:BikkleGymEnvironment",
+)
+
+class FlatBikkleGymEnvironmentWrapper(ObservationWrapper):
+    def __init__(self, env: BikkleGymEnvironment):
+        super().__init__(env)
+        obs_space = env.observation_space
+        total_dim = (
+            obs_space["agent_position"].shape[0]
+            + obs_space["cyan"].feature_space.shape[0]*env.num_blocks//2
+            + obs_space["pink"].feature_space.shape[0]*env.num_blocks//2
+            + obs_space["steps"].shape[0]
+        )
+        self.observation_space = spaces.Box(
+            low=0, high=1, shape=(total_dim,), dtype=np.float32
+        )
+
+    def observation(self, observation):
+        agent_position = observation["agent_position"].flatten()
+        cyan = observation["cyan"].flatten()
+        pink = observation["pink"].flatten()
+        steps = observation["steps"].flatten()
+        return np.concatenate([agent_position, cyan, pink, steps])
+
+
+def generate_flat_bikkle_env(*args, **kwargs) ->  gym.Env:
+    env = BikkleGymEnvironment(*args, **kwargs)
+    return TimeLimit(FlatBikkleGymEnvironmentWrapper(env), max_episode_steps=200)
+
+gym.envs.registration.register(
+    id="FlatBikkleGymEnvironment-v0",
+    entry_point=generate_flat_bikkle_env,
 )

@@ -2,12 +2,24 @@
 - I *think* the overall algorithm is working, but it doesn't seem very efficient in terms of samples. I can see the agent is sort of able to learn to get some pellets, but
 it's not consistent and doesn't seem to differentiate between blue and pink.
 - Next:
- - Double-check reward structure
- - Add event based replay buffer
+ - [x] Double-check reward structure
+ - [x] Add event based replay buffer
  - Try speeding up the learning using compile, etc.
  - Try multiple envs per step.
  - Add another self-attention block
  - Rework preprocess_bikkle_observation_with_mask
+
+- reward changes: actually, there's no relation to the timer in the reward structure, right now it's just a noise
+observation. Corrected
+- I keep having issues with cuda. Things often get into a weird state where any use of CUDA fails. I wonder if this
+has to do with overheating or something.
+  - I have not been able to resolve this. I tried upgrading my nvidia drivers, reinstalling cuda 12.8 and installing torch with cuda support. I think I should try the baseline leanrl files and see if that works.
+  - my current baseline on CPU with compile is 62 it/s... actually 7? It briefly spiked, not sure what's going on.
+  - It's not obvious that compile is helping at all.
+- action changes: just assume we always want to move at a constant rate and just control the direction.
+	Undecided:
+	Let's change the action space. Instead of controlling the x-y movement, we assume the agent always moves at full speed: a vector of magnitude 1. The action space is only 1 element that varies from 0 to 1 which gets converted between -180 degrees and 180 degrees. So the action describes the direction in which the movement vector faces.
+
 
 
 2025-05-05

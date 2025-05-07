@@ -204,11 +204,9 @@ class BikklePolicy(nn.Module):
         assert not torch.isnan(std).any(), "NaN in std"
         assert not torch.isinf(std).any(), "Inf in std"
         normal = torch.distributions.Normal(mean, std)
-        x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
-        if greedy:
-            action = mean
-        else:
-            action = torch.tanh(x_t)
+        x_t = mean if greedy else normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
+
+        action = torch.tanh(x_t)
         # action = y_t * self.action_scale + self.action_bias
         log_prob = normal.log_prob(x_t)
         # Enforcing Action Bound
@@ -236,6 +234,8 @@ def preprocess_bikkle_observation_with_mask(
     max_blocks: int = 100,
     device: str = "cpu"
 ) -> dict[str, dict[str, torch.Tensor]]:
+
+    max_blocks = max_blocks // 2 # TODO: temp hack
 
     """
     TODO: I'm applying padding to the blocks, but I shouldn't really worry about that, I should apply padding over the
@@ -304,3 +304,108 @@ def preprocess_bikkle_observation_with_mask(
             masks[key] = torch.zeros((tensor.shape[0], 1), dtype=torch.bool, device=device)
 
     return {"tokens": tokens, "indices": indices, "mask": masks}
+
+class SimpleValueFunction(nn.Module):
+    def __init__(self, observation_space: gym.spaces.Dict, action_space: gym.spaces.Box,
+                 num_cyan: int, num_pink: int, mlp_hidden_size: int = 128) -> None:
+        super(SimpleValueFunction, self).__init__()
+
+        assert isinstance(action_space, spaces.Box)
+        assert isinstance(observation_space, spaces.Dict)
+
+        # Calculate the input size based on the observation space and action space
+        agent_position_size = observation_space["agent_position"].shape[0]
+        cyan_size = num_cyan * observation_space["cyan"].feature_space.shape[0]
+        pink_size = num_pink * observation_space["pink"].feature_space.shape[0]
+        action_size = action_space.shape[0]
+
+        input_size = agent_position_size + cyan_size + pink_size + action_size
+
+        # Define the MLP
+        self.mlp = nn.Sequential(
+            nn.Linear(input_size, mlp_hidden_size),
+            nn.ReLU(),
+            nn.Linear(mlp_hidden_size, mlp_hidden_size),
+            nn.ReLU(),
+            nn.Linear(mlp_hidden_size, 1)  # Single output head
+        )
+
+    def forward(self, observations: dict[str, dict[torch.Tensor]], action: torch.Tensor) -> torch.Tensor:
+        # Extract and concatenate inputs in the specified order
+        agent_position = observations["tokens"]["agent_position"]
+        agent_position = agent_position.view(agent_position.shape[0], -1)
+        cyan = observations["tokens"]["cyan"].view(agent_position.shape[0], -1)  # Flatten cyan
+        pink = observations["tokens"]["pink"].view(agent_position.shape[0], -1)  # Flatten pink
+        action = action
+
+        # Concatenate all inputs
+        inputs = torch.cat([agent_position, cyan, pink, action], dim=1)
+
+        # Pass through the MLP
+        output = self.mlp(inputs)
+        return output
+
+class SimplePolicy(nn.Module):
+    def __init__(self, observation_space: gym.spaces.Dict, num_cyan: int, num_pink: int,
+                 action_space: gym.spaces.Box, mlp_hidden_size: int = 128, log_std_min: float = -2.0, log_std_max: float=2.0) -> None:
+        super(SimplePolicy, self).__init__()
+
+        self.log_std_min = log_std_min
+        self.log_std_max = log_std_max
+
+        assert isinstance(action_space, spaces.Box)
+        assert isinstance(observation_space, spaces.Dict)
+
+        # Calculate the input size based on the observation space
+        agent_position_size = observation_space["agent_position"].shape[0]
+        cyan_size = num_cyan * observation_space["cyan"].feature_space.shape[0]
+        pink_size = num_pink * observation_space["pink"].feature_space.shape[0]
+
+        input_size = agent_position_size + cyan_size + pink_size
+
+        # Define the MLP
+        self.mlp = nn.Sequential(
+            nn.Linear(input_size, mlp_hidden_size),
+            nn.ReLU(),
+            nn.Linear(mlp_hidden_size, mlp_hidden_size),
+            nn.ReLU(),
+        )
+
+        # Gaussian output layers
+        self.mean_head = nn.Linear(mlp_hidden_size, action_space.shape[0])
+        self.log_std_head = nn.Linear(mlp_hidden_size, action_space.shape[0])
+
+    def forward(self, observations: dict[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        # Extract and concatenate inputs in the specified order
+        agent_position = observations["agent_position"]
+        agent_position = agent_position.view(agent_position.shape[0], -1)
+        cyan = observations["cyan"].view(agent_position.shape[0], -1)  # Flatten cyan
+        pink = observations["pink"].view(agent_position.shape[0], -1)  # Flatten pink
+
+        # Concatenate all inputs
+        inputs = torch.cat([agent_position, cyan, pink], dim=1)
+
+        # Pass through the MLP
+        features = self.mlp(inputs)
+
+        # Compute mean and log standard deviation
+        mean = self.mean_head(features)
+        log_std = self.log_std_head(features)
+
+        # Clamp log_std for numerical stability
+        log_std = torch.clamp(log_std, min=self.log_std_min, max=self.log_std_max)
+
+        return mean, log_std
+
+    def get_action(self, tokens: dict[str, torch.Tensor], indices: dict[str, torch.Tensor],
+                   mask: dict[str, torch.Tensor], greedy: bool=False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        mean, log_std = self.forward(tokens)
+        std = log_std.exp()
+
+        normal = torch.distributions.Normal(mean, std)
+        x_t = mean if greedy else normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
+        action = torch.tanh(x_t)
+        log_prob = normal.log_prob(x_t)
+        log_prob = log_prob.sum(1, keepdim=True)
+
+        return action, log_prob, mean
