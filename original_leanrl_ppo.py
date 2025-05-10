@@ -1,8 +1,5 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
 import os
-from pathlib import Path
-
-from gymnasium.vector import AutoresetMode
 
 os.environ["TORCHDYNAMO_INLINE_INBUILT_NN_MODULES"] = "1"
 
@@ -18,7 +15,6 @@ import gymnasium as gym
 import numpy as np
 import tensordict
 import torch
-torch.autograd.set_detect_anomaly(True)
 import torch.nn as nn
 import torch.optim as optim
 import tqdm
@@ -27,9 +23,6 @@ import wandb
 from tensordict import from_module
 from tensordict.nn import CudaGraphModule
 from torch.distributions.normal import Normal
-tensordict.nn.functional_modules._exclude_td_from_pytree().set()
-
-import env
 
 
 @dataclass
@@ -97,22 +90,20 @@ class Args:
     cudagraphs: bool = False
     """whether to use cudagraphs on top of compile."""
 
-    model_save_interval: int = 100
 
-
-def make_env(env_id, idx, capture_video, run_name, gamma, **kwargs):
+def make_env(env_id, idx, capture_video, run_name, gamma):
     def thunk():
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array")
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
-            env = gym.make(env_id, **kwargs)
+            env = gym.make(env_id)
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = gym.wrappers.ClipAction(env)
-        # env = gym.wrappers.NormalizeObservation(env)
-        env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10), observation_space=env.observation_space)
-        # env = gym.wrappers.NormalizeReward(env, gamma=gamma)
+        env = gym.wrappers.NormalizeObservation(env)
+        # env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
+        env = gym.wrappers.NormalizeReward(env, gamma=gamma)
         env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
         return env
 
@@ -124,8 +115,9 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-class Value(nn.Module):
-    def __init__(self, n_obs, device=None):
+
+class Agent(nn.Module):
+    def __init__(self, n_obs, n_act, device=None):
         super().__init__()
         self.critic = nn.Sequential(
             layer_init(nn.Linear(n_obs, 64, device=device)),
@@ -134,14 +126,6 @@ class Value(nn.Module):
             nn.Tanh(),
             layer_init(nn.Linear(64, 1, device=device), std=1.0),
         )
-
-    def get_value(self, x):
-        return self.critic(x)
-
-
-class Policy(nn.Module):
-    def __init__(self, n_obs, n_act, device=None):
-        super().__init__()
         self.actor_mean = nn.Sequential(
             layer_init(nn.Linear(n_obs, 64, device=device)),
             nn.Tanh(),
@@ -151,16 +135,17 @@ class Policy(nn.Module):
         )
         self.actor_logstd = nn.Parameter(torch.zeros(1, n_act, device=device))
 
-    def get_action_and_value(self, obs, action=None, greedy: bool = False):
+    def get_value(self, x):
+        return self.critic(x)
+
+    def get_action_and_value(self, obs, action=None):
         action_mean = self.actor_mean(obs)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
-        if greedy:
-            action = action_mean
         if action is None:
             action = action_mean + action_std * torch.randn_like(action_mean)
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1)
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(obs)
 
 
 def gae(next_obs, next_done, container):
@@ -193,17 +178,16 @@ def rollout(obs, done, avg_returns=[]):
     ts = []
     for step in range(args.num_steps):
         # ALGO LOGIC: action logic
-        action, logprob, _ = policy(obs=obs)
-        value = get_value(obs)
+        action, logprob, _, value = policy(obs=obs)
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, reward, next_done, infos = step_func(action)
 
         if "final_info" in infos:
-            info = infos["final_info"]
-            avg_returns.extend(info["episode"]["r"])
-            # max_ep_ret = max(max_ep_ret, r)
-            # avg_returns.append(r)
+            for info in infos["final_info"]:
+                r = float(info["episode"]["r"].reshape(()))
+                # max_ep_ret = max(max_ep_ret, r)
+                avg_returns.append(r)
             # desc = f"global_step={global_step}, episodic_return={torch.tensor(avg_returns).mean(): 4.2f} (max={max_ep_ret: 4.2f})"
 
         ts.append(
@@ -228,9 +212,7 @@ def rollout(obs, done, avg_returns=[]):
 
 def update(obs, actions, logprobs, advantages, returns, vals):
     optimizer.zero_grad()
-    _, newlogprob, entropy = policy_m.get_action_and_value(obs, actions)
-    newvalue = value_m.get_value(obs)
-
+    _, newlogprob, entropy, newvalue = agent.get_action_and_value(obs, actions)
     logratio = newlogprob - logprobs
     ratio = logratio.exp()
 
@@ -267,7 +249,7 @@ def update(obs, actions, logprobs, advantages, returns, vals):
     loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
 
     loss.backward()
-    gn = nn.utils.clip_grad_norm_(list(policy_m.parameters()) + list(value_m.parameters()), args.max_grad_norm)
+    gn = nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
     optimizer.step()
 
     return approx_kl, v_loss.detach(), pg_loss.detach(), entropy_loss.detach(), old_approx_kl, clipfrac, gn
@@ -286,17 +268,14 @@ if __name__ == "__main__":
     args.minibatch_size = batch_size // args.num_minibatches
     args.batch_size = args.num_minibatches * args.minibatch_size
     args.num_iterations = args.total_timesteps // args.batch_size
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{args.compile}__{args.cudagraphs}__{int(time.time())}"
+    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{args.compile}__{args.cudagraphs}"
 
-    wandb_run = wandb.init(
+    wandb.init(
         project="ppo_continuous_action",
         name=f"{os.path.splitext(os.path.basename(__file__))[0]}-{run_name}",
         config=vars(args),
         save_code=True,
     )
-
-    outdir = Path("data") / Path(wandb_run.name)
-    outdir.mkdir(parents=True, exist_ok=True)
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -308,8 +287,7 @@ if __name__ == "__main__":
 
     ####### Environment setup #######
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma) for i in range(args.num_envs)],
-        autoreset_mode=AutoresetMode.SAME_STEP,
+        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma) for i in range(args.num_envs)]
     )
     n_act = math.prod(envs.single_action_space.shape)
     n_obs = math.prod(envs.single_observation_space.shape)
@@ -323,20 +301,15 @@ if __name__ == "__main__":
         return torch.as_tensor(next_obs_np, dtype=torch.float), torch.as_tensor(reward), torch.as_tensor(next_done), info
 
     ####### Agent #######
-    policy_m = Policy(n_obs, n_act, device=device)
+    agent = Agent(n_obs, n_act, device=device)
     # Make a version of agent with detached params
-    policy_inference_m = Policy(n_obs, n_act, device=device)
-    policy_inference_p = from_module(policy_m).data
-    policy_inference_p.to_module(policy_inference_m)
-
-    value_m = Value(n_obs, device=device)
-    value_inference_m = Value(n_obs, device=device)
-    value_inference_p = from_module(value_m).data
-    value_inference_p.to_module(value_inference_m)
+    agent_inference = Agent(n_obs, n_act, device=device)
+    agent_inference_p = from_module(agent).data
+    agent_inference_p.to_module(agent_inference)
 
     ####### Optimizer #######
     optimizer = optim.Adam(
-        list(policy_m.parameters()) + list(value_m.parameters()),
+        agent.parameters(),
         lr=torch.tensor(args.learning_rate, device=device),
         eps=1e-5,
         capturable=args.cudagraphs and not args.compile,
@@ -344,8 +317,8 @@ if __name__ == "__main__":
 
     ####### Executables #######
     # Define networks: wrapping the policy in a TensorDictModule allows us to use CudaGraphModule
-    policy = policy_inference_m.get_action_and_value
-    get_value = value_inference_m.get_value
+    policy = agent_inference.get_action_and_value
+    get_value = agent_inference.get_value
 
     # Compile policy
     if args.compile:
@@ -387,27 +360,17 @@ if __name__ == "__main__":
 
         # Optimizing the policy and value network
         clipfracs = []
-        update_results = []  # Collect results from update calls
-
         for epoch in range(args.update_epochs):
             b_inds = torch.randperm(container_flat.shape[0], device=device).split(args.minibatch_size)
             for b in b_inds:
                 container_local = container_flat[b]
 
                 out = update(container_local, tensordict_out=tensordict.TensorDict())
-                update_results.append(out)  # Store the results
-
                 if args.target_kl is not None and out["approx_kl"] > args.target_kl:
                     break
             else:
                 continue
             break
-
-        # Compute the mean of the collected results
-        mean_results = {key: torch.stack([res[key] for res in update_results]).mean().item() for key in update_results[0].keys()}
-
-        # Log the mean results to wandb
-        wandb.log({f"mean_{key}": value for key, value in mean_results.items()}, step=global_step)
 
         if global_step_burnin is not None and iteration % 10 == 0:
             speed = (global_step - global_step_burnin) / (time.time() - start_time)
@@ -436,10 +399,5 @@ if __name__ == "__main__":
             wandb.log(
                 {"speed": speed, "episode_return": avg_returns_t, "r": r, "r_max": r_max, "lr": lr, **logs}, step=global_step
             )
-
-        if global_step % args.model_save_interval == 0:
-            # Save models
-            torch.save(policy_m.state_dict(), outdir / f"actor_{global_step}.pth")
-            torch.save(value_m.state_dict(), outdir / f"value_{global_step}.pth")
 
     envs.close()
