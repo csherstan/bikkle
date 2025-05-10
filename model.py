@@ -100,9 +100,49 @@ class BaseBikkleModel(nn.Module):
 
 
 class BikkleValueFunction(nn.Module):
-    def __init__(self, observation_space: gym.spaces.Dict, action_space: gym.spaces.Box,
+    def __init__(self, observation_space: gym.spaces.Dict,
                  token_size: int = 64, num_attention_heads: int = 4, mlp_hidden_size: int = 128) -> None:
         super(BikkleValueFunction, self).__init__()
+
+        assert isinstance(observation_space, spaces.Dict)
+        observation_space = copy.deepcopy(observation_space)
+
+        self.base = BaseBikkleModel(observation_space, token_size=token_size,
+                                    num_attention_heads=num_attention_heads)
+
+        # Final MLP
+        self.mlp = nn.Sequential(
+            nn.Linear(token_size, mlp_hidden_size),
+            nn.ReLU(),
+            nn.LayerNorm(mlp_hidden_size),
+            nn.Linear(mlp_hidden_size, 1)  # Single output head
+        )
+
+    def forward(self, observations: dict[str, dict[torch.Tensor]]) -> torch.Tensor:
+        tokens = observations["tokens"]
+        indices = observations["indices"]
+        mask = observations["mask"]
+        # assert_is_nan(tokens)
+        # assert_is_inf(tokens)
+        # assert_is_nan(indices)
+        # assert_is_inf(indices)
+        # assert_is_nan(mask)
+        # assert_is_inf(mask)
+        # assert not torch.isnan(action).any(), "Nan detected in value action"
+        # assert not torch.isinf(action).any(), "Inf detected in value action"
+
+        aggregated_tokens = self.base(tokens, indices, mask)
+
+        output = self.mlp(aggregated_tokens)
+
+        # assert not torch.isnan(output).any(), "Nan detected in value prediction"
+        # assert not torch.isinf(output).any(), "Inf detected in value prediction"
+
+        return output
+class BikkleActionValueFunction(nn.Module):
+    def __init__(self, observation_space: gym.spaces.Dict, action_space: gym.spaces.Box,
+                 token_size: int = 64, num_attention_heads: int = 4, mlp_hidden_size: int = 128) -> None:
+        super(BikkleActionValueFunction, self).__init__()
 
         assert isinstance(action_space, spaces.Box)
         assert isinstance(observation_space, spaces.Dict)
@@ -196,7 +236,7 @@ class BikklePolicy(nn.Module):
         return mean, log_std
 
     def get_action(self, tokens: dict[str, torch.Tensor], indices: dict[str, torch.Tensor],
-                   mask: dict[str, torch.Tensor], greedy: bool=False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                   mask: dict[str, torch.Tensor], greedy: bool=False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         mean, log_std = self(tokens, indices, mask)
         std = log_std.exp()
         assert not torch.isnan(mean).any(), "NaN in mean"
@@ -204,6 +244,7 @@ class BikklePolicy(nn.Module):
         assert not torch.isnan(std).any(), "NaN in std"
         assert not torch.isinf(std).any(), "Inf in std"
         normal = torch.distributions.Normal(mean, std)
+        entropy = normal.entropy()
         x_t = mean if greedy else normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
 
         action = torch.tanh(x_t)
@@ -213,7 +254,7 @@ class BikklePolicy(nn.Module):
         # log_prob -= torch.log(self.action_scale * (1 - action.pow(2)) + 1e-6)
         log_prob = log_prob.sum(1, keepdim=True)
         # mean = torch.tanh(mean) * self.action_scale + self.action_bias
-        return action, log_prob, mean
+        return action, log_prob, mean, entropy.sum(axis=1, keepdim=True)
 
 
 key_to_idx = {

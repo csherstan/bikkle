@@ -1,3 +1,32 @@
+2025-05-10
+
+- I've been working on this a ton, but I keep hitting walls on getting the basic system working - I haven't even gotten
+to the difficult part here. At present it works if I use PPO, terminate the episode when a token is touched, ensure
+that I use reward normalization, and use an MLP.
+- If I use SAC it's just not working. I
+- Adapting PPO to work with the self-attention model has been a pain. Still not working.
+- Is there a way I could simplify further?
+	- Don't use a self-attention model?
+	- Use a well known environment?
+- I have PPO running with the self-attention model running, but not working.
+- If I try using cudagraphs with PPO it doesn't work -> throws an error.
+
+Next steps:
+- Simplify the environment further. Drop cyan completely.
+- Οrder the tokens by how close they are. This seems to have helped the PPO case significantly.
+- Drop the self-attention approach completely. Instead just set up to use the MLP approach with a place holder value
+to indicate that eyetracking is not available.
+- log losses for PPO.
+
+SAC:
+- reduce gamma to 0.5
+  - Check this one out: https://wandb.ai/csherstan-team/sac_continuous_action/runs/8f7jpgzh
+- n-step returns for S
+- cascade architecture
+
+
+
+
 2025-05-06
 - I *think* the overall algorithm is working, but it doesn't seem very efficient in terms of samples. I can see the agent is sort of able to learn to get some pellets, but
 it's not consistent and doesn't seem to differentiate between blue and pink.

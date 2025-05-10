@@ -47,8 +47,7 @@ while running:
 
     # Check if the game should terminate
     if terminated or truncated:
-        print("Game over!")
-        running = False
+        env.reset()
 
     # Limit the frame rate
     clock.tick(30)

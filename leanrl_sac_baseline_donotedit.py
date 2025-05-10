@@ -1,5 +1,6 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/sac/#sac_continuous_actionpy
 import os
+from pathlib import Path
 
 from gymnasium.vector import AutoresetMode
 
@@ -29,6 +30,10 @@ from torchrl.data import LazyTensorStorage, ReplayBuffer
 
 from env import *
 
+gym.envs.registration.register(
+    id="LunarLander-v3-continuous",
+    entry_point=lambda *args, **kwargs: gym.make("LunarLander-v3", continuous=True, **kwargs),
+)
 
 @dataclass
 class Args:
@@ -79,6 +84,8 @@ class Args:
     measure_burnin: int = 3
     """Number of burn-in iterations for speed measure."""
 
+    model_save_interval: int = 10000
+
 
 def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
@@ -88,6 +95,8 @@ def make_env(env_id, seed, idx, capture_video, run_name):
         else:
             env = gym.make(env_id)
         env = gym.wrappers.RecordEpisodeStatistics(env)
+        env = gym.wrappers.NormalizeReward(env, gamma=args.gamma)
+        env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
         env.action_space.seed(seed)
         return env
 
@@ -114,13 +123,54 @@ LOG_STD_MAX = 2
 LOG_STD_MIN = -5
 
 
+# class Actor(nn.Module):
+#     def __init__(self, env, n_obs, n_act, device=None, feature_size=256):
+#         super().__init__()
+#         self.fc1 = nn.Linear(n_obs, feature_size, device=device)
+#         self.fc2 = nn.Linear(feature_size, feature_size, device=device)
+#         self.fc_mean = nn.Linear(feature_size, n_act, device=device)
+#         self.fc_logstd = nn.Linear(feature_size, n_act, device=device)
+#         # action rescaling
+#         self.register_buffer(
+#             "action_scale",
+#             torch.tensor((env.action_space.high - env.action_space.low) / 2.0, dtype=torch.float32, device=device),
+#         )
+#         self.register_buffer(
+#             "action_bias",
+#             torch.tensor((env.action_space.high + env.action_space.low) / 2.0, dtype=torch.float32, device=device),
+#         )
+#
+#     def forward(self, x):
+#         x = F.relu(self.fc1(x))
+#         x = F.relu(self.fc2(x))
+#         mean = self.fc_mean(x)
+#         log_std = self.fc_logstd(x)
+#         log_std = torch.tanh(log_std)
+#         log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)  # From SpinUp / Denis Yarats
+#
+#         return mean, log_std
+#
+#     def get_action(self, x):
+#         mean, log_std = self(x)
+#         std = log_std.exp()
+#         normal = torch.distributions.Normal(mean, std)
+#         x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
+#         y_t = torch.tanh(x_t)
+#         action = y_t * self.action_scale + self.action_bias
+#         log_prob = normal.log_prob(x_t)
+#         # Enforcing Action Bound
+#         log_prob -= torch.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6)
+#         log_prob = log_prob.sum(1, keepdim=True)
+#         mean = torch.tanh(mean) * self.action_scale + self.action_bias
+#         return action, log_prob, mean
+
 class Actor(nn.Module):
-    def __init__(self, env, n_obs, n_act, device=None):
+    def __init__(self, env, n_obs, n_act, device=None, feature_size=64):
         super().__init__()
-        self.fc1 = nn.Linear(n_obs, 256, device=device)
-        self.fc2 = nn.Linear(256, 256, device=device)
-        self.fc_mean = nn.Linear(256, n_act, device=device)
-        self.fc_logstd = nn.Linear(256, n_act, device=device)
+        self.fc1 = nn.Linear(n_obs, feature_size, device=device)
+        self.fc2 = nn.Linear(feature_size, feature_size, device=device)
+        self.fc_mean = nn.Linear(feature_size, n_act, device=device)
+        self.fc_logstd = nn.Linear(feature_size, n_act, device=device)
         # action rescaling
         self.register_buffer(
             "action_scale",
@@ -132,8 +182,8 @@ class Actor(nn.Module):
         )
 
     def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
+        x = F.tanh(self.fc1(x))
+        x = F.tanh(self.fc2(x))
         mean = self.fc_mean(x)
         log_std = self.fc_logstd(x)
         log_std = torch.tanh(log_std)
@@ -155,17 +205,19 @@ class Actor(nn.Module):
         mean = torch.tanh(mean) * self.action_scale + self.action_bias
         return action, log_prob, mean
 
-
 if __name__ == "__main__":
     args = tyro.cli(Args)
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{args.compile}__{args.cudagraphs}"
+    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{args.compile}__{args.cudagraphs}__{int(time.time())}"
 
-    wandb.init(
+    wandb_run = wandb.init(
         project="sac_continuous_action",
         name=f"{os.path.splitext(os.path.basename(__file__))[0]}-{run_name}",
         config=vars(args),
         save_code=True,
     )
+
+    outdir = Path("data") / Path(wandb_run.name)
+    outdir.mkdir(parents=True, exist_ok=True)
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -214,6 +266,7 @@ if __name__ == "__main__":
         a_optimizer = optim.Adam([log_alpha], lr=args.q_lr, capturable=args.cudagraphs and not args.compile)
     else:
         alpha = torch.as_tensor(args.alpha, device=device)
+        log_alpha = torch.log(alpha)
 
     envs.single_observation_space.dtype = np.float32
     rb = ReplayBuffer(storage=LazyTensorStorage(args.buffer_size, device=device))
@@ -258,6 +311,7 @@ if __name__ == "__main__":
         actor_loss.backward()
         actor_optimizer.step()
 
+        alpha_loss = torch.zeros_like(alpha)
         if args.autotune:
             a_optimizer.zero_grad()
             with torch.no_grad():
@@ -311,13 +365,12 @@ if __name__ == "__main__":
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if "final_info" in infos:
             info = infos["final_info"]
-            r = float(info["episode"]["r"])
-            max_ep_ret = max(max_ep_ret, r)
-            avg_returns.append(r)
-
-            desc = (
-                f"global_step={global_step}, episodic_return={torch.tensor(avg_returns).mean(): 4.2f} (max={max_ep_ret: 4.2f})"
-            )
+            avg_returns.extend(info["episode"]["r"])
+            # max_ep_ret = max(max_ep_ret, info["episode"]["r"])
+            #
+            # desc = (
+            #     f"global_step={global_step}, episodic_return={torch.tensor(avg_returns).mean(): 4.2f} (max={max_ep_ret: 4.2f})"
+            # )
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
         next_obs = torch.as_tensor(next_obs, device=device, dtype=torch.float)
@@ -375,5 +428,10 @@ if __name__ == "__main__":
                     },
                     step=global_step,
                 )
+
+                if global_step % args.model_save_interval == 0:
+                    # Save models
+                    torch.save(actor.state_dict(), outdir / f"actor_model_{global_step}.pth")
+                    torch.save(qnet_params.state_dict(), outdir / f"qnet_model_{global_step}.pth")
 
     envs.close()

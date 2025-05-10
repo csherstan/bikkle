@@ -15,7 +15,6 @@ import time
 from dataclasses import dataclass
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import tqdm
@@ -25,7 +24,7 @@ from tensordict import TensorDict, from_module, from_modules
 from tensordict.nn import CudaGraphModule, TensorDictModule
 
 from torchrl.data import ReplayBuffer, ListStorage
-from model import BikklePolicy, preprocess_bikkle_observation_with_mask, BikkleValueFunction, SimplePolicy, \
+from model import BikklePolicy, preprocess_bikkle_observation_with_mask, BikkleActionValueFunction, SimplePolicy, \
     SimpleValueFunction
 from env import *
 
