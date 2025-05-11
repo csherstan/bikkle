@@ -99,6 +99,11 @@ class Args:
 
     model_save_interval: int = 100
 
+    network_dims: int = 64
+    dropout: float = 0.1
+
+
+
 
 def make_env(env_id, idx, capture_video, run_name, gamma, **kwargs):
     def thunk():
@@ -112,7 +117,7 @@ def make_env(env_id, idx, capture_video, run_name, gamma, **kwargs):
         env = gym.wrappers.ClipAction(env)
         # env = gym.wrappers.NormalizeObservation(env)
         env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10), observation_space=env.observation_space)
-        # env = gym.wrappers.NormalizeReward(env, gamma=gamma)
+        env = gym.wrappers.NormalizeReward(env, gamma=gamma)
         env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
         return env
 
@@ -125,14 +130,14 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 class Value(nn.Module):
-    def __init__(self, n_obs, device=None):
+    def __init__(self, n_obs, device=None, network_dims=64):
         super().__init__()
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(n_obs, 64, device=device)),
+            layer_init(nn.Linear(n_obs, network_dims, device=device)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, 64, device=device)),
+            layer_init(nn.Linear(network_dims, network_dims, device=device)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, 1, device=device), std=1.0),
+            layer_init(nn.Linear(network_dims, 1, device=device), std=1.0),
         )
 
     def get_value(self, x):
@@ -140,17 +145,18 @@ class Value(nn.Module):
 
 
 class Policy(nn.Module):
-    def __init__(self, n_obs, n_act, device=None):
+    def __init__(self, n_obs, n_act, device=None, dropout_p=0.0, network_dims=64):
         super().__init__()
         self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(n_obs, 64, device=device)),
+            layer_init(nn.Linear(n_obs, network_dims, device=device)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, 64, device=device)),
+            nn.Dropout(p=dropout_p),
+            layer_init(nn.Linear(network_dims, network_dims, device=device)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, n_act, device=device), std=0.01),
+            nn.Dropout(p=dropout_p),
+            layer_init(nn.Linear(network_dims, n_act, device=device), std=0.01),
         )
         self.actor_logstd = nn.Parameter(torch.zeros(1, n_act, device=device))
-
     def get_action_and_value(self, obs, action=None, greedy: bool = False):
         action_mean = self.actor_mean(obs)
         action_logstd = self.actor_logstd.expand_as(action_mean)
@@ -286,7 +292,8 @@ if __name__ == "__main__":
     args.minibatch_size = batch_size // args.num_minibatches
     args.batch_size = args.num_minibatches * args.minibatch_size
     args.num_iterations = args.total_timesteps // args.batch_size
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{args.compile}__{args.cudagraphs}__{int(time.time())}"
+    time_str = int(time.time())
+    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{time_str}"
 
     wandb_run = wandb.init(
         project="ppo_continuous_action",
@@ -295,7 +302,7 @@ if __name__ == "__main__":
         save_code=True,
     )
 
-    outdir = Path("data") / Path(wandb_run.name)
+    outdir = Path("data") / args.env_id / args.exp_name / f"{time_str}_{wandb_run.id}"
     outdir.mkdir(parents=True, exist_ok=True)
 
     # TRY NOT TO MODIFY: seeding
@@ -323,14 +330,16 @@ if __name__ == "__main__":
         return torch.as_tensor(next_obs_np, dtype=torch.float), torch.as_tensor(reward), torch.as_tensor(next_done), info
 
     ####### Agent #######
-    policy_m = Policy(n_obs, n_act, device=device)
+    policy_m = Policy(n_obs, n_act, device=device, dropout_p=args.dropout, network_dims=args.network_dims)
+    policy_m.train()
     # Make a version of agent with detached params
-    policy_inference_m = Policy(n_obs, n_act, device=device)
+    policy_inference_m = Policy(n_obs, n_act, device=device, network_dims=args.network_dims)
     policy_inference_p = from_module(policy_m).data
     policy_inference_p.to_module(policy_inference_m)
+    policy_inference_m.train()
 
-    value_m = Value(n_obs, device=device)
-    value_inference_m = Value(n_obs, device=device)
+    value_m = Value(n_obs, device=device, network_dims=args.network_dims)
+    value_inference_m = Value(n_obs, device=device, network_dims=args.network_dims)
     value_inference_p = from_module(value_m).data
     value_inference_p.to_module(value_inference_m)
 

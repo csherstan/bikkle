@@ -6,10 +6,10 @@ import torch
 from gymnasium.vector import AutoresetMode
 
 from env import BikkleGymEnvironment
-from leanrl_ppo_baseline import Agent, make_env
+from leanrl_ppo_baseline import make_env, Policy
 
 # Load the saved policy model
-model_path = "/home/sherstancraig/work/maincode/data/leanrl_ppo_baseline-FlatBikkleGymEnvironment-v0__leanrl_ppo_baseline__1__True__False__1746878353/actor_model_1331200.pth"  # Replace with your saved model path
+model_path = "/home/sherstancraig/work/maincode/data/leanrl_ppo_baseline-FlatBikkleGymEnvironment-v0__leanrl_ppo_baseline__1__True__False__1746921999/actor_358400.pth"  # Replace with your saved model path
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = "cpu"
 
@@ -40,7 +40,8 @@ n_obs = math.prod(envs.single_observation_space.shape)
 
 # Load the policy model
 # policy = BikklePolicy(observation_space=obs_space, action_space=action_space).to(device)
-agent = Agent(n_obs=n_obs, n_act=n_act, device=device)
+# agent = Agent(n_obs=n_obs, n_act=n_act, device=device)
+agent = Policy(n_obs, n_act, device=device, network_dims=16)
 agent.load_state_dict(torch.load(model_path, map_location=device))
 policy = agent.get_action_and_value
 
@@ -52,7 +53,7 @@ count = 0
 while running:
     # Get the action from the policy
     with torch.no_grad():
-        action, _, _, _ = policy(torch.as_tensor(obs, dtype=torch.float), greedy=True)
+        action, _, _ = policy(torch.as_tensor(obs, dtype=torch.float), greedy=True)
     action = action.cpu().numpy()
 
     # Step the environment
