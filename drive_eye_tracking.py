@@ -1,6 +1,10 @@
+import os
+
 import numpy as np
 from env import generate_eye_tracking_env
 import pygame
+
+os.environ['SDL_VIDEO_FULLSCREEN_DISPLAY'] = '0'
 
 # Initialize the environment
 env = generate_eye_tracking_env()

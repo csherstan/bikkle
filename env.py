@@ -1,3 +1,4 @@
+import os
 from collections import deque
 
 import gymnasium as gym
@@ -416,13 +417,17 @@ class EyeTrackingObservationWrapper(ObservationWrapper):
         self.cap = VideoCapture(2)
 
         self.observation_space = original_obs_space
-        screen_info = pygame.display.Info()
 
-        self.window = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
-        self.screen_width, self.screen_height = self.window.get_size()
+        self.screen_info = pygame.display.Info()
+        self.screen_width = self.screen_info.current_w
+        self.screen_height = self.screen_info.current_h
 
-        self.screen_width = screen_info.current_w
-        self.screen_height = screen_info.current_h
+        x_offset = (self.screen_width - self.screen_height) // 2
+        y_offset = 0
+        # os.environ['SDL_VIDEO_WINDOW_POS'] = f"{x_offset},{y_offset}"
+
+
+        self.window = pygame.display.set_mode((self.screen_height, self.screen_height), pygame.NOFRAME)
 
         self.gestures.setFixation(1.0)
 
@@ -457,7 +462,7 @@ class EyeTrackingObservationWrapper(ObservationWrapper):
                                                self.screen_height,
                                                context="my_context")
             pygame.draw.circle(self.window, BLUE, cevent.point, cevent.acceptance_radius)
-            pygame.draw.circle(self.window, BLUE, cevent.point, 50)
+            pygame.draw.circle(self.window, RED, cevent.point, 50)
             if not np.array_equal(cevent.point, prev):
                 iterator += 1
                 prev = cevent.point
