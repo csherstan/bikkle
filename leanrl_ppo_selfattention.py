@@ -1,4 +1,5 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
+import dataclasses
 import os
 from pathlib import Path
 
@@ -79,7 +80,7 @@ class Args:
     """coefficient of the value function"""
     max_grad_norm: float = 0.5
     """the maximum norm for the gradient clipping"""
-    target_kl: float = None
+    target_kl: Optional[float] = None
     """the target KL divergence threshold"""
 
     # to be filled in runtime
@@ -102,8 +103,8 @@ class Args:
 
     dropout: float = 0.1
 
-    policy_params: BikklePolicyParams = BikklePolicyParams()
-    value_params: BikkleValueFunctionParams = BikkleValueFunctionParams()
+    policy_params: BikklePolicyParams = dataclasses.field(default_factory=BikklePolicyParams)
+    value_params: BikkleValueFunctionParams = dataclasses.field(default_factory=BikkleValueFunctionParams)
 
     checkpoint_to_load: Optional[Path] = None
 

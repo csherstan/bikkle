@@ -12,13 +12,14 @@ import random
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Tuple, Any
+from typing import Tuple, Any, Optional
 
 import gymnasium as gym
 import numpy as np
 import tensordict
 import torch
 torch.autograd.set_detect_anomaly(True)
+torch.set_float32_matmul_precision('high')
 import torch.nn as nn
 import torch.optim as optim
 import tqdm
@@ -78,7 +79,7 @@ class Args:
     """coefficient of the value function"""
     max_grad_norm: float = 0.5
     """the maximum norm for the gradient clipping"""
-    target_kl: float = None
+    target_kl: Optional[float] = None
     """the target KL divergence threshold"""
 
     # to be filled in runtime
