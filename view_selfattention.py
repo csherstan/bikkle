@@ -52,7 +52,7 @@ count = 0
 while running:
     # Get the action from the policy
     with torch.no_grad():
-        action, _, _ = policy(TensorDict(obs, device=device, batch_size=(1, )), greedy=False)
+        action, _, _ = policy(TensorDict(obs, device=device, batch_size=(1, )), greedy=True)
     action = action.cpu().numpy()
 
     # Step the environment

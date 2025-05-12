@@ -7,6 +7,23 @@ issue - it may have overheated.
 - The self-attention run looked like it was learning well actually: https://wandb.ai/csherstan-team/ppo_continuous_action/runs/oh278s94
   - I do note that the mean_entropy_loss was pinned, I'm not sure what that would mean.
 
+ Best self-attention model so far: https://wandb.ai/csherstan-team/ppo_continuous_action/runs/5asd1v8c
+
+ Trying for a smaller self-attention model: https://wandb.ai/csherstan-team/ppo_continuous_action/runs/7mytmpxd
+ - This one looks very similar to oh278s94, maybe slightly better.
+
+ Tried with `num_envs=4` https://wandb.ai/csherstan-team/ppo_continuous_action/runs/6o2dr3jo. This one is not as good
+   - I suspect I may need to change some other hyperparams such as the batch size.
+   - The learning curve is slower, but consistently upward. It looks pretty nice.
+
+Ok, now I need to integrate this with the eyetracking data. The plan is to take a pretrained model, then train with
+human eyetracking data. I think I will try to run only one environment at a time, so I don't need to stack.
+When training the model we will only optimize over the linear embedding and the offset embedding.
+- modify the PPO training script to take in a trained model
+- set the optimizer to only consider the params of interest
+- create some sort of modifier for the environment
+
+
 2025-05-11
 
 Thinking about this more.

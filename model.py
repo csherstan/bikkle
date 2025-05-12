@@ -146,7 +146,7 @@ class BaseBikkleModel(nn.Module):
 
 class BikkleValueFunction(nn.Module):
     def __init__(self, observation_space: gym.spaces.Dict,
-                 token_size: int = 32, num_attention_heads: int = 4, mlp_hidden_size: int = 64) -> None:
+                 token_size: int = 64, num_attention_heads: int = 4, mlp_hidden_size: int = 128) -> None:
         super(BikkleValueFunction, self).__init__()
 
         assert isinstance(observation_space, spaces.Dict)
@@ -245,7 +245,7 @@ LOG_STD_MIN = -5
 
 class BikklePolicy(nn.Module):
     def __init__(self, observation_space: gym.spaces.Dict, action_space: gym.spaces.Box,
-                 token_size: int = 32, num_attention_heads: int = 4, mlp_hidden_size: int = 64) -> None:
+                 token_size: int = 64, num_attention_heads: int = 4, mlp_hidden_size: int = 128) -> None:
         super(BikklePolicy, self).__init__()
 
         self.base = BaseBikkleModel(observation_space, token_size=token_size,

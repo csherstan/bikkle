@@ -28,6 +28,7 @@ import tyro
 import wandb
 from tensordict import from_module, TensorDict
 from tensordict.nn import CudaGraphModule
+import env
 
 tensordict.nn.functional_modules._exclude_td_from_pytree().set()
 
