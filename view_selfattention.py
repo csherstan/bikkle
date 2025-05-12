@@ -4,17 +4,19 @@ import gymnasium as gym
 import pygame
 import torch
 from gymnasium.vector import AutoresetMode
+from tensordict import TensorDict
 
 from env import BikkleGymEnvironment
-from leanrl_ppo_baseline import make_env, Policy
+from leanrl_ppo_selfattention import make_env
+from model import BikklePolicy
 
 # Load the saved policy model
-model_path = "/home/sherstancraig/work/maincode/data/FlatBikkleGymEnvironment-v0/leanrl_ppo_baseline/1746926905_t53n9z8r/actor_1996800.pth"  # Replace with your saved model path
+model_path = "/home/sherstancraig/work/maincode/data/BikkleSelfAttention-v0/leanrl_ppo_selfattention/1746998624_5asd1v8c/actor_1996800.pth"
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = "cpu"
 
 # Initialize the environment
-env = make_env("FlatBikkleGymEnvironment-v0", 0, capture_video=False, run_name="", gamma=0.99, render_mode="human", continuing=True)()
+env = make_env("BikkleSelfAttention-v0", 0, capture_video=False, run_name="", gamma=0.99, render_mode="human", continuing=True, num_blocks=10)()
 # base_env = BikkleGymEnvironment()
 # env = FlatBikkleGymEnvironmentWrapper(base_env)
 # env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
@@ -35,13 +37,9 @@ while True:
 envs = gym.vector.SyncVectorEnv([lambda : env], autoreset_mode=AutoresetMode.SAME_STEP)
 obs_space = env.observation_space
 action_space = env.action_space
-n_act = math.prod(envs.single_action_space.shape)
-n_obs = math.prod(envs.single_observation_space.shape)
 
 # Load the policy model
-# policy = BikklePolicy(observation_space=obs_space, action_space=action_space).to(device)
-# agent = Agent(n_obs=n_obs, n_act=n_act, device=device)
-agent = Policy(n_obs, n_act, device=device, network_dims=64)
+agent = BikklePolicy(observation_space=obs_space, action_space=action_space).to(device)
 agent.load_state_dict(torch.load(model_path, map_location=device))
 agent.eval()
 policy = agent.get_action
@@ -54,7 +52,7 @@ count = 0
 while running:
     # Get the action from the policy
     with torch.no_grad():
-        action, _, _ = policy(torch.as_tensor(obs, dtype=torch.float), greedy=True)
+        action, _, _ = policy(TensorDict(obs, device=device, batch_size=(1, )), greedy=False)
     action = action.cpu().numpy()
 
     # Step the environment

@@ -1,3 +1,31 @@
+2025-05-12
+
+Overnight 2 runs crashed, it looks like they crashed at the same wallclock time. I'm thinking there is a GPU
+issue - it may have overheated.
+
+- The CNN based run didn't show signs of learning the problem.
+- The self-attention run looked like it was learning well actually: https://wandb.ai/csherstan-team/ppo_continuous_action/runs/oh278s94
+  - I do note that the mean_entropy_loss was pinned, I'm not sure what that would mean.
+
+2025-05-11
+
+Thinking about this more.
+- I could try doing some sort of human training + behavior cloning from existing policy for PPO
+training. This might not work very well though.
+- From a personal perspective, I really want to at least get the self-attention model working.
+- ChatGPT suggest that the self-attention model would train better with SAC than PPO.
+
+2 things I want to do:
+1. finish the integration of human data collection with model training.
+2. Get the self-attention model working. I really want to figure this out. I'm going to change my
+approach though:
+ - Use an observation wrapper as the preprocessor.
+ - Use a single encoder for all the token types. Really, I should just remove the blue tokens.
+
+Another idea that James suggested was to use a semantic image and then just apply a CNN.
+**how should I initialize the self-attention?**
+**where should I apply LayerNorm?**
+
 2025-05-10
 
 - I've been working on this a ton, but I keep hitting walls on getting the basic system working - I haven't even gotten
@@ -17,6 +45,8 @@ Next steps:
 - Drop the self-attention approach completely. Instead just set up to use the MLP approach with a place holder value
 to indicate that eyetracking is not available.
 - log losses for PPO.
+
+Here is a baseline PPO run: https://wandb.ai/csherstan-team/ppo_continuous_action/runs/ywexn8i3
 
 SAC:
 - reduce gamma to 0.5

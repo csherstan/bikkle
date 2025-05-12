@@ -4,6 +4,8 @@ from pathlib import Path
 
 from gymnasium.vector import AutoresetMode
 
+from model import BikklePolicy, BikkleValueFunction, BikkleSemanticImagePolicy, BikkleSemanticImageValue
+
 os.environ["TORCHDYNAMO_INLINE_INBUILT_NN_MODULES"] = "1"
 
 import math
@@ -19,12 +21,13 @@ import numpy as np
 import tensordict
 import torch
 torch.autograd.set_detect_anomaly(True)
+torch.set_float32_matmul_precision('high')
 import torch.nn as nn
 import torch.optim as optim
 import tqdm
 import tyro
 import wandb
-from tensordict import from_module
+from tensordict import from_module, TensorDict
 from tensordict.nn import CudaGraphModule
 from torch.distributions.normal import Normal
 tensordict.nn.functional_modules._exclude_td_from_pytree().set()
@@ -113,11 +116,11 @@ def make_env(env_id, idx, capture_video, run_name, gamma, **kwargs):
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
             env = gym.make(env_id, **kwargs)
-        env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
+        # env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = gym.wrappers.ClipAction(env)
         # env = gym.wrappers.NormalizeObservation(env)
-        env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10), observation_space=env.observation_space)
+        # env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10), observation_space=env.observation_space)
         env = gym.wrappers.NormalizeReward(env, gamma=gamma)
         env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
         return env
@@ -130,44 +133,44 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-class Value(nn.Module):
-    def __init__(self, n_obs, device=None, network_dims=64):
-        super().__init__()
-        self.critic = nn.Sequential(
-            layer_init(nn.Linear(n_obs, network_dims, device=device)),
-            nn.Tanh(),
-            layer_init(nn.Linear(network_dims, network_dims, device=device)),
-            nn.Tanh(),
-            layer_init(nn.Linear(network_dims, 1, device=device), std=1.0),
-        )
-
-    def get_value(self, x):
-        return self.critic(x)
-
-
-class Policy(nn.Module):
-    def __init__(self, n_obs, n_act, device=None, dropout_p=0.0, network_dims=64):
-        super().__init__()
-        self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(n_obs, network_dims, device=device)),
-            nn.Tanh(),
-            nn.Dropout(p=dropout_p),
-            layer_init(nn.Linear(network_dims, network_dims, device=device)),
-            nn.Tanh(),
-            nn.Dropout(p=dropout_p),
-            layer_init(nn.Linear(network_dims, n_act, device=device), std=0.01),
-        )
-        self.actor_logstd = nn.Parameter(torch.zeros(1, n_act, device=device))
-    def get_action(self, obs, action=None, greedy: bool = False):
-        action_mean = self.actor_mean(obs)
-        action_logstd = self.actor_logstd.expand_as(action_mean)
-        action_std = torch.exp(action_logstd)
-        probs = Normal(action_mean, action_std)
-        if greedy:
-            action = action_mean
-        if action is None:
-            action = action_mean + action_std * torch.randn_like(action_mean)
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1)
+# class Value(nn.Module):
+#     def __init__(self, n_obs, device=None, network_dims=64):
+#         super().__init__()
+#         self.critic = nn.Sequential(
+#             layer_init(nn.Linear(n_obs, network_dims, device=device)),
+#             nn.Tanh(),
+#             layer_init(nn.Linear(network_dims, network_dims, device=device)),
+#             nn.Tanh(),
+#             layer_init(nn.Linear(network_dims, 1, device=device), std=1.0),
+#         )
+#
+#     def get_value(self, x):
+#         return self.critic(x)
+#
+#
+# class Policy(nn.Module):
+#     def __init__(self, n_obs, n_act, device=None, dropout_p=0.0, network_dims=64):
+#         super().__init__()
+#         self.actor_mean = nn.Sequential(
+#             layer_init(nn.Linear(n_obs, network_dims, device=device)),
+#             nn.Tanh(),
+#             nn.Dropout(p=dropout_p),
+#             layer_init(nn.Linear(network_dims, network_dims, device=device)),
+#             nn.Tanh(),
+#             nn.Dropout(p=dropout_p),
+#             layer_init(nn.Linear(network_dims, n_act, device=device), std=0.01),
+#         )
+#         self.actor_logstd = nn.Parameter(torch.zeros(1, n_act, device=device))
+#     def get_action(self, obs, action=None, greedy: bool = False):
+#         action_mean = self.actor_mean(obs)
+#         action_logstd = self.actor_logstd.expand_as(action_mean)
+#         action_std = torch.exp(action_logstd)
+#         probs = Normal(action_mean, action_std)
+#         if greedy:
+#             action = action_mean
+#         if action is None:
+#             action = action_mean + action_std * torch.randn_like(action_mean)
+#         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1)
 
 
 def gae(next_obs, next_done, container):
@@ -319,8 +322,10 @@ if __name__ == "__main__":
         [make_env(args.env_id, i, args.capture_video, run_name, args.gamma) for i in range(args.num_envs)],
         autoreset_mode=AutoresetMode.SAME_STEP,
     )
-    n_act = math.prod(envs.single_action_space.shape)
-    n_obs = math.prod(envs.single_observation_space.shape)
+    # n_act = math.prod(envs.single_action_space.shape)
+    # n_obs = math.prod(envs.single_observation_space.shape)
+    obs_space = envs.single_observation_space
+    act_space = envs.single_action_space
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
     # Register step as a special op not to graph break
@@ -331,16 +336,19 @@ if __name__ == "__main__":
         return torch.as_tensor(next_obs_np, dtype=torch.float), torch.as_tensor(reward), torch.as_tensor(next_done), info
 
     ####### Agent #######
-    policy_m = Policy(n_obs, n_act, device=device, dropout_p=args.dropout, network_dims=args.network_dims)
+    policy_m = BikkleSemanticImagePolicy(image_size=obs_space.shape[1], action_space=act_space).to(device)
+    # policy_m = Policy(n_obs, n_act, device=device, dropout_p=args.dropout, network_dims=args.network_dims)
     policy_m.train()
     # Make a version of agent with detached params
-    policy_inference_m = Policy(n_obs, n_act, device=device, network_dims=args.network_dims)
+    policy_inference_m = BikkleSemanticImagePolicy(image_size=obs_space.shape[1], action_space=act_space).to(device)
     policy_inference_p = from_module(policy_m).data
     policy_inference_p.to_module(policy_inference_m)
     policy_inference_m.train()
 
-    value_m = Value(n_obs, device=device, network_dims=args.network_dims)
-    value_inference_m = Value(n_obs, device=device, network_dims=args.network_dims)
+    value_m = BikkleSemanticImageValue(image_size=obs_space.shape[1]).to(device)
+    # value_m = Value(n_obs, device=device, network_dims=args.network_dims)
+    value_inference_m = BikkleSemanticImageValue(image_size=obs_space.shape[1]).to(device)
+    # value_inference_m = Value(n_obs, device=device, network_dims=args.network_dims)
     value_inference_p = from_module(value_m).data
     value_inference_p.to_module(value_inference_m)
 

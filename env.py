@@ -13,6 +13,8 @@ import pygame
 from eyeGestures.utils import VideoCapture
 from eyeGestures import EyeGestures_v3
 
+from model import data_type_idx
+
 
 class BikkleGymEnvironment(gym.Env):
 
@@ -337,3 +339,153 @@ class EyeTrackingObservationWrapper(ObservationWrapper):
         event, calibration = self.gestures.step(frame, False, self.screen_width, self.screen_height, context="my_context")
         # TODO: we need to make this relative to window. I think it might already do this, but we need to double-check.
         return np.concatenate([observation, event])
+
+
+class BikkleSelfAttentionWrapper(gym.ObservationWrapper):
+    def __init__(self, env: gym.Env):
+        super().__init__(env)
+        assert isinstance(env, BikkleGymEnvironment)
+        self.max_blocks = max_blocks = env.num_blocks
+        self.observation_space = Dict({
+            "tokens": Dict({
+                "agent_position": Box(low=0, high=1, shape=(2,), dtype=np.float32),
+                "block": Box(low=-1, high=1, shape=(max_blocks, 3), dtype=np.float32),
+                "eye_tracking": Box(low=0, high=1, shape=(2,), dtype=np.float32),
+            }),
+            "indices": Dict({
+                "agent_position": Box(low=0, high=0, shape=(1,), dtype=np.int64),
+                "block": Box(low=1, high=1, shape=(max_blocks,), dtype=np.int64),
+                "eye_tracking": Box(low=2, high=2, shape=(1,), dtype=np.int64),
+            }),
+            "mask": Dict({
+                "agent_position": Box(low=0, high=1, shape=(1,), dtype=np.bool_),
+                "block": Box(low=0, high=1, shape=(max_blocks,), dtype=np.bool_),
+                "eye_tracking": Box(low=0, high=1, shape=(1,), dtype=np.bool_),
+            }),
+        })
+
+    def observation(self, observation):
+        # Extract agent position
+        agent_position = observation["agent_position"]
+
+        # Combine cyan and pink blocks
+        cyan_blocks = observation["cyan"]
+        pink_blocks = observation["pink"]
+        num_cyan = cyan_blocks.shape[0]
+        num_pink = pink_blocks.shape[0]
+
+        # Add a column to indicate block type (cyan=1, pink=0)
+        cyan_with_type = np.hstack((cyan_blocks, np.ones((num_cyan, 1), dtype=np.float32)))
+        pink_with_type = np.hstack((pink_blocks, np.zeros((num_pink, 1), dtype=np.float32)))
+
+        # Stack cyan and pink blocks
+        blocks = np.vstack((cyan_with_type, pink_with_type))
+
+        # Pad blocks to max_blocks
+        padded_blocks = np.zeros((self.max_blocks, 3), dtype=np.float32)
+        padded_blocks[:blocks.shape[0]] = blocks
+
+        # Create mask for blocks
+        block_mask = np.ones((self.max_blocks,), dtype=np.bool_)
+        block_mask[:blocks.shape[0]] = 0  # Mark present blocks as 0
+
+        # Eye tracking (set to zeros)
+        eye_tracking = np.zeros((2,), dtype=np.float32)
+        eye_tracking_mask = np.ones((1,), dtype=np.bool_)  # Mark as absent
+
+        # Indices
+        agent_position_index = np.array([data_type_idx["agent_position"]], dtype=np.int64)
+        block_indices = np.full((self.max_blocks,), data_type_idx["block"], dtype=np.int64)
+        eye_tracking_index = np.array([data_type_idx["eye_tracking"]], dtype=np.int64)
+
+        # Combine into the final observation
+        return {
+            "tokens": {
+                "agent_position": agent_position,
+                "block": padded_blocks,
+                "eye_tracking": eye_tracking,
+            },
+            "indices": {
+                "agent_position": agent_position_index,
+                "block": block_indices,
+                "eye_tracking": eye_tracking_index,
+            },
+            "mask": {
+                "agent_position": np.array([0], dtype=np.bool_),  # Always present
+                "block": block_mask,
+                "eye_tracking": eye_tracking_mask,
+            },
+        }
+
+
+def generate_self_attention_wrapper(*args, **kwargs) ->  gym.Env:
+    env = BikkleGymEnvironment(*args, **kwargs)
+    return TimeLimit(BikkleSelfAttentionWrapper(env), max_episode_steps=100)
+
+gym.envs.registration.register(
+    id="BikkleSelfAttention-v0",
+    entry_point=lambda *args, **kwargs: generate_self_attention_wrapper(*args, **kwargs),
+)
+
+
+class BikkleSemanticImageObservationWrapper(gym.ObservationWrapper):
+    def __init__(self, env: gym.Env, image_size: int = 64):
+        """
+        Wraps the BikkleGymEnvironment to convert observations into a 4-channel image.
+
+        Args:
+            env (gym.Env): The environment to wrap.
+            image_size (int): The width and height of the square image.
+        """
+        super().__init__(env)
+        self.image_size = image_size
+        self.observation_space = gym.spaces.Box(
+            low=0, high=1, shape=(4, image_size, image_size), dtype=np.float32
+        )
+
+    def observation(self, observation: dict) -> np.ndarray:
+        """
+        Converts the observation into a 4-channel image.
+
+        Args:
+            observation (dict): The original observation from the environment.
+
+        Returns:
+            np.ndarray: A 4-channel image representation of the observation.
+        """
+        # Initialize the 4-channel image
+        image = np.zeros((4, self.image_size, self.image_size), dtype=np.float32)
+
+        # Extract agent position and normalize to image coordinates
+        agent_x, agent_y = observation["agent_position"]
+        agent_x = int(agent_x * (self.image_size - 1))
+        agent_y = int(agent_y * (self.image_size - 1))
+
+        # Set the agent position in channel 1
+        image[0, agent_y, agent_x] = 1.0
+
+        # Process cyan blocks
+        for block in observation["cyan"]:
+            block_x = int((agent_x + block[0]) * (self.image_size - 1))
+            block_y = int((agent_y + block[1]) * (self.image_size - 1))
+            if 0 <= block_x < self.image_size and 0 <= block_y < self.image_size:
+                image[1, block_y, block_x] = 1.0
+
+        # Process pink blocks
+        for block in observation["pink"]:
+            block_x = int((agent_x + block[0]) * (self.image_size - 1))
+            block_y = int((agent_y + block[1]) * (self.image_size - 1))
+            if 0 <= block_x < self.image_size and 0 <= block_y < self.image_size:
+                image[2, block_y, block_x] = 1.0
+
+        # Channel 4 remains all zeros
+        return image
+
+def generate_semantic_image_wrapper(*args, **kwargs) ->  gym.Env:
+    env = BikkleGymEnvironment(*args, **kwargs)
+    return TimeLimit(BikkleSemanticImageObservationWrapper(env), max_episode_steps=100)
+
+gym.envs.registration.register(
+    id="BikkleSemanticImage-v0",
+    entry_point=lambda *args, **kwargs: generate_semantic_image_wrapper(*args, **kwargs),
+)
