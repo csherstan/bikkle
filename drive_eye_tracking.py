@@ -1,18 +1,10 @@
-import pygame
 import numpy as np
-from env import BikkleGymEnvironment
+from env import generate_eye_tracking_env
+import pygame
 
 # Initialize the environment
-env = BikkleGymEnvironment()
-env.reset()
-
-
-
-# Initialize pygame
-pygame.init()
-screen = pygame.display.set_mode((env.screen_size, env.screen_size))
-pygame.display.set_caption("Control Agent with Arrow Keys")
-clock = pygame.time.Clock()
+env = generate_eye_tracking_env()
+obs, _ = env.reset()
 
 # Define movement mapping for arrow keys
 key_to_action = {
@@ -38,10 +30,7 @@ while running:
             action += movement
 
     # Step the environment
-    observation, reward, terminated, truncated, info = env.step(action)
-
-    # Render the environment
-    env.render()
+    obs, reward, terminated, truncated, info = env.step(action)
 
     # Print reward if non-zero
     if reward != 0:
@@ -49,11 +38,8 @@ while running:
 
     # Check if the game should terminate
     if terminated or truncated:
-        env.reset()
-
-    # Limit the frame rate
-    clock.tick(30)
+        print("Game over!")
+        obs, _ = env.reset()
 
 # Clean up
 env.close()
-pygame.quit()

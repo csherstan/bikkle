@@ -318,29 +318,6 @@ class AddNegativeObservationWrapper(ObservationWrapper):
         return np.concatenate([observation, np.full((2,), -2, dtype=np.float32)])
 
 
-class EyeTrackingObservationWrapper(ObservationWrapper):
-
-    def __init__(self, env: gym.Env, gestures):
-        super().__init__(env)
-        original_obs_space = env.observation_space
-        assert isinstance(original_obs_space, spaces.Box)
-        self.observation_space = original_obs_space
-        self.gestures = gestures
-
-        screen_info = pygame.display.Info()
-        self.screen_width = screen_info.current_w
-        self.screen_height = screen_info.current_h
-
-        self.cap = VideoCapture(2)
-
-    def observation(self, observation):
-        frame = self.cap.read()
-        # already calibrated before running.
-        event, calibration = self.gestures.step(frame, False, self.screen_width, self.screen_height, context="my_context")
-        # TODO: we need to make this relative to window. I think it might already do this, but we need to double-check.
-        return np.concatenate([observation, event])
-
-
 class BikkleSelfAttentionWrapper(gym.ObservationWrapper):
     def __init__(self, env: gym.Env):
         super().__init__(env)
@@ -350,7 +327,7 @@ class BikkleSelfAttentionWrapper(gym.ObservationWrapper):
             "tokens": Dict({
                 "agent_position": Box(low=0, high=1, shape=(2,), dtype=np.float32),
                 "block": Box(low=-1, high=1, shape=(max_blocks, 3), dtype=np.float32),
-                "eye_tracking": Box(low=0, high=1, shape=(2,), dtype=np.float32),
+                "eye_tracking": Box(low=-1, high=1, shape=(2,), dtype=np.float32),
             }),
             "indices": Dict({
                 "agent_position": Box(low=0, high=0, shape=(1,), dtype=np.int64),
@@ -427,6 +404,108 @@ gym.envs.registration.register(
     entry_point=lambda *args, **kwargs: generate_self_attention_wrapper(*args, **kwargs),
 )
 
+
+class EyeTrackingObservationWrapper(ObservationWrapper):
+
+    def __init__(self, env: gym.Env):
+        assert isinstance(env, BikkleSelfAttentionWrapper)
+        super().__init__(env)
+        original_obs_space = env.observation_space
+
+        self.gestures = EyeGestures_v3()
+        self.cap = VideoCapture(2)
+
+        self.observation_space = original_obs_space
+        screen_info = pygame.display.Info()
+
+        self.window = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+        self.screen_width, self.screen_height = self.window.get_size()
+
+        self.screen_width = screen_info.current_w
+        self.screen_height = screen_info.current_h
+
+        self.gestures.setFixation(1.0)
+
+        self.calibrate(20)
+        self.clock = pygame.time.Clock()
+
+        self.base_env = self.env
+        while not isinstance(self.base_env, BikkleGymEnvironment):
+            self.base_env = self.base_env.env
+
+    def calibrate(self, count: int) -> None:
+
+        x = np.arange(0, 1.1, 0.2)
+        y = np.arange(0, 1.1, 0.2)
+
+        xx, yy = np.meshgrid(x, y)
+        calibration_map = np.column_stack([xx.ravel(), yy.ravel()])
+        np.random.shuffle(calibration_map)
+        self.gestures.uploadCalibrationMap(calibration_map, context="my_context")
+
+        prev = np.array([0, 0])
+        iterator = 0
+        BLUE = (100, 0, 255)
+        RED = (255, 0, 100)
+        GREEN = (0, 255, 0)
+        while iterator < count:
+            self.window.fill((0, 0, 0))  # Clear the window with black
+            ret, frame = self.cap.read()
+            event, cevent = self.gestures.step(frame,
+                                               True,
+                                               self.screen_width,
+                                               self.screen_height,
+                                               context="my_context")
+            pygame.draw.circle(self.window, BLUE, cevent.point, cevent.acceptance_radius)
+            pygame.draw.circle(self.window, BLUE, cevent.point, 50)
+            if not np.array_equal(cevent.point, prev):
+                iterator += 1
+                prev = cevent.point
+            pygame.draw.circle(self.window, GREEN, event.point, 50)
+            pygame.display.flip()
+
+
+
+    def observation(self, observation):
+        ret, frame = self.cap.read()
+        # already calibrated before running.
+        event, _ = self.gestures.step(frame, False, self.screen_width, self.screen_height, context="my_context")
+        observation["tokens"]["eye_tracking"] = np.array([
+            2 * (event.point[0] / self.screen_width) - 1,
+            2 * (event.point[1] / self.screen_height) - 1
+        ], dtype=np.float32)
+        observation["mask"]["eye_tracking"] = np.array([0], dtype=np.bool_)
+        return observation
+
+    def reset(self, seed: int = None, options: dict = None) -> tuple[dict, dict]:
+        self.calibrate(5)  # Call the calibrate routine before resetting
+        return super().reset(seed=seed)
+
+    def step(self, action):
+        obs, reward, truncated, terminated, info = super().step(action)
+
+        pygame.surfarray.blit_array(self.window, self.base_env._human_image)
+        window_width, window_height = self.window.get_size()
+        image_width, image_height = self.env._human_image.shape[:2]
+        x_offset = (window_width - image_width) // 2
+        y_offset = (window_height - image_height) // 2
+        self.window.blit(pygame.surfarray.make_surface(self.env._human_image), (x_offset, y_offset))
+
+        self.clock.tick(10)
+        pygame.display.flip()
+
+        return obs, reward, truncated, terminated, info
+
+def generate_eye_tracking_env(*args, **kwargs) ->  gym.Env:
+    env = BikkleGymEnvironment(*args, **kwargs)
+    env = BikkleSelfAttentionWrapper(env)
+    env = EyeTrackingObservationWrapper(env)
+    return TimeLimit(env, max_episode_steps=200)
+
+gym.envs.registration.register(
+    id="BikkleEyeTracking-v0",
+    entry_point=lambda *args, **kwargs: generate_eye_tracking_env(*args, **kwargs),
+)
 
 class BikkleSemanticImageObservationWrapper(gym.ObservationWrapper):
     def __init__(self, env: gym.Env, image_size: int = 64):

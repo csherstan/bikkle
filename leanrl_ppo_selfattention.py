@@ -4,7 +4,7 @@ from pathlib import Path
 
 from gymnasium.vector import AutoresetMode
 
-from model import BikklePolicy, BikkleValueFunction
+from model import BikklePolicy, BikkleValueFunction, BikklePolicyParams, BikkleValueFunctionParams
 
 os.environ["TORCHDYNAMO_INLINE_INBUILT_NN_MODULES"] = "1"
 
@@ -13,7 +13,7 @@ import random
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Tuple, Any
+from typing import Tuple, Any, Optional
 
 import gymnasium as gym
 import numpy as np
@@ -100,11 +100,12 @@ class Args:
 
     model_save_interval: int = 100
 
-    network_dims: int = 64
     dropout: float = 0.1
 
+    policy_params: BikklePolicyParams = BikklePolicyParams()
+    value_params: BikkleValueFunctionParams = BikkleValueFunctionParams()
 
-
+    checkpoint_to_load: Optional[Path] = None
 
 
 def make_env(env_id, idx, capture_video, run_name, gamma, **kwargs):
@@ -130,45 +131,6 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
-
-# class Value(nn.Module):
-#     def __init__(self, n_obs, device=None, network_dims=64):
-#         super().__init__()
-#         self.critic = nn.Sequential(
-#             layer_init(nn.Linear(n_obs, network_dims, device=device)),
-#             nn.Tanh(),
-#             layer_init(nn.Linear(network_dims, network_dims, device=device)),
-#             nn.Tanh(),
-#             layer_init(nn.Linear(network_dims, 1, device=device), std=1.0),
-#         )
-#
-#     def get_value(self, x):
-#         return self.critic(x)
-#
-#
-# class Policy(nn.Module):
-#     def __init__(self, n_obs, n_act, device=None, dropout_p=0.0, network_dims=64):
-#         super().__init__()
-#         self.actor_mean = nn.Sequential(
-#             layer_init(nn.Linear(n_obs, network_dims, device=device)),
-#             nn.Tanh(),
-#             nn.Dropout(p=dropout_p),
-#             layer_init(nn.Linear(network_dims, network_dims, device=device)),
-#             nn.Tanh(),
-#             nn.Dropout(p=dropout_p),
-#             layer_init(nn.Linear(network_dims, n_act, device=device), std=0.01),
-#         )
-#         self.actor_logstd = nn.Parameter(torch.zeros(1, n_act, device=device))
-#     def get_action(self, obs, action=None, greedy: bool = False):
-#         action_mean = self.actor_mean(obs)
-#         action_logstd = self.actor_logstd.expand_as(action_mean)
-#         action_std = torch.exp(action_logstd)
-#         probs = Normal(action_mean, action_std)
-#         if greedy:
-#             action = action_mean
-#         if action is None:
-#             action = action_mean + action_std * torch.randn_like(action_mean)
-#         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1)
 
 
 def gae(next_obs, next_done, container):
@@ -210,9 +172,6 @@ def rollout(obs, done, avg_returns=[]):
         if "final_info" in infos:
             info = infos["final_info"]
             avg_returns.extend(info["episode"]["r"])
-            # max_ep_ret = max(max_ep_ret, r)
-            # avg_returns.append(r)
-            # desc = f"global_step={global_step}, episodic_return={torch.tensor(avg_returns).mean(): 4.2f} (max={max_ep_ret: 4.2f})"
 
         ts.append(
             tensordict.TensorDict._new_unsafe(
@@ -287,6 +246,56 @@ update = tensordict.nn.TensorDictModule(
     out_keys=["approx_kl", "v_loss", "pg_loss", "entropy_loss", "old_approx_kl", "clipfrac", "gn"],
 )
 
+def save_model_checkpoint(policy_model, value_model, global_step, outdir, policy_params, value_params):
+    """
+    Saves the model parameters and additional information to a checkpoint file.
+
+    Args:
+        policy_model (nn.Module): The policy model to save.
+        value_model (nn.Module): The value model to save.
+        global_step (int): The current global step.
+        outdir (Path): The directory to save the checkpoint.
+        policy_params (BikklePolicyParams): The policy parameters.
+        value_params (BikkleValueFunctionParams): The value function parameters.
+    """
+    checkpoint = {
+        "version": 1,
+        "policy_state_dict": policy_model.state_dict(),
+        "value_state_dict": value_model.state_dict(),
+        "global_step": global_step,
+        "policy_params": policy_params,
+        "value_params": value_params,
+    }
+    torch.save(checkpoint, outdir / f"checkpoint_{global_step}.pth")
+
+def restore_models(observation_space, action_space, args, device):
+    """
+    Restores the policy and value models from a checkpoint or creates them from args.
+
+    Args:
+        observation_space (gym.Space): The observation space of the environment.
+        action_space (gym.Space): The action space of the environment.
+        args (Args): The arguments containing model parameters and checkpoint path.
+        device (torch.device): The device to load the models onto.
+
+    Returns:
+        tuple: A tuple containing the policy model and value model.
+    """
+
+    # Create the policy model
+    policy_model = BikklePolicy(observation_space=observation_space, action_space=action_space, params=args.policy_params).to(device)
+
+    # Create the value model
+    value_model = BikkleValueFunction(observation_space=observation_space, params=args.value_params).to(device)
+
+    # Load checkpoint if provided
+    if args.checkpoint_to_load:
+        checkpoint = torch.load(args.checkpoint_to_load, map_location=device)
+        policy_model.load_state_dict(checkpoint["policy_state_dict"])
+        value_model.load_state_dict(checkpoint["value_state_dict"])
+
+    return policy_model, value_model
+
 if __name__ == "__main__":
     args = tyro.cli(Args)
 
@@ -334,19 +343,21 @@ if __name__ == "__main__":
         return TensorDict(next_obs_np, device=device, batch_size=(args.num_envs, )), torch.as_tensor(reward), torch.as_tensor(next_done), info
 
     ####### Agent #######
-    policy_m = BikklePolicy(observation_space=obs_space, action_space=act_space).to(device)
-    # policy_m = Policy(n_obs, n_act, device=device, dropout_p=args.dropout, network_dims=args.network_dims)
+
+    # policy_m = BikklePolicy(observation_space=obs_space, action_space=act_space, params=args.policy_params).to(device)
+    assert isinstance(obs_space, gym.spaces.Dict)
+    assert isinstance(act_space, gym.spaces.Box)
+
+    policy_m, value_m = restore_models(observation_space=obs_space, action_space=act_space, args=args, device=device)
+
     policy_m.train()
     # Make a version of agent with detached params
-    policy_inference_m = BikklePolicy(observation_space=obs_space, action_space=act_space).to(device)
+    policy_inference_m = BikklePolicy(observation_space=obs_space, action_space=act_space, params=args.policy_params).to(device)
     policy_inference_p = from_module(policy_m).data
     policy_inference_p.to_module(policy_inference_m)
     policy_inference_m.train()
 
-    value_m = BikkleValueFunction(observation_space=obs_space).to(device)
-    # value_m = Value(n_obs, device=device, network_dims=args.network_dims)
-    value_inference_m = BikkleValueFunction(observation_space=obs_space).to(device)
-    # value_inference_m = Value(n_obs, device=device, network_dims=args.network_dims)
+    value_inference_m = BikkleValueFunction(observation_space=obs_space, params=args.value_params).to(device)
     value_inference_p = from_module(value_m).data
     value_inference_p.to_module(value_inference_m)
 
@@ -455,7 +466,13 @@ if __name__ == "__main__":
 
         if global_step % args.model_save_interval == 0:
             # Save models
-            torch.save(policy_m.state_dict(), outdir / f"actor_{global_step}.pth")
-            torch.save(value_m.state_dict(), outdir / f"value_{global_step}.pth")
+            save_model_checkpoint(
+                policy_model=policy_m,
+                value_model=value_m,
+                global_step=global_step,
+                outdir=outdir,
+                policy_params=args.policy_params,
+                value_params=args.value_params,
+            )
 
     envs.close()

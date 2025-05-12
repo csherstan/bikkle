@@ -1,5 +1,4 @@
 import copy
-from typing import Optional
 
 import numpy as np
 import torch
@@ -9,8 +8,7 @@ import math
 import gymnasium.spaces as spaces
 from gymnasium.spaces import Sequence
 import gymnasium as gym
-
-
+from dataclasses import dataclass
 
 def create_sinusoidal_embedding(num_positions: int, embedding_dim: int) -> nn.Parameter:
     position = torch.arange(num_positions).unsqueeze(1)  # Shape: (num_positions, 1)
@@ -28,14 +26,20 @@ def assert_is_inf(x: dict[str, torch.Tensor]) -> None:
     for key, value in x.items():
         assert not torch.isinf(value).any(), f"Inf detected in {key}"
 
+
+@dataclass
+class BaseBikkleModelParams:
+    token_size: int = 64
+    num_attention_heads: int = 4
+
 class BaseBikkleModel(nn.Module):
-    def __init__(self, observation_space: gym.spaces.Dict, token_size: int = 64,
-                 num_attention_heads: int = 4):
+    def __init__(self, observation_space: gym.spaces.Dict, params: BaseBikkleModelParams):
         super(BaseBikkleModel, self).__init__()
 
         num_obs_types = len(observation_space.keys())
 
-        self.token_size = token_size
+        token_size = params.token_size
+        num_attention_heads = params.num_attention_heads
 
         # Embedding offsets for observations and actions
         self.embedding_offsets = nn.Embedding(num_obs_types, token_size)
@@ -43,7 +47,6 @@ class BaseBikkleModel(nn.Module):
         # Pre-attention LayerNorm (pre-norm style)
         self.pre_attention_ln = nn.LayerNorm(token_size)
 
-        # TODO: where do I add LayerNorm?
         def make_one_embedding(space):
             if isinstance(space, Sequence):
                 space = space.feature_space
@@ -144,23 +147,32 @@ class BaseBikkleModel(nn.Module):
         return aggregated_tokens
 
 
+@dataclass
+class BikkleValueFunctionParams:
+    base_params: BaseBikkleModelParams = BaseBikkleModelParams()
+    mlp_hidden_size: int = 128
+
 class BikkleValueFunction(nn.Module):
-    def __init__(self, observation_space: gym.spaces.Dict,
-                 token_size: int = 64, num_attention_heads: int = 4, mlp_hidden_size: int = 128) -> None:
+    def __init__(self, observation_space: gym.spaces.Dict, params: BikkleValueFunctionParams) -> None:
         super(BikkleValueFunction, self).__init__()
 
         assert isinstance(observation_space, spaces.Dict)
         observation_space = copy.deepcopy(observation_space)
 
-        self.base = BaseBikkleModel(observation_space, token_size=token_size,
-                                    num_attention_heads=num_attention_heads)
+        token_size = params.base_params.token_size
 
-        # Final MLP
+        self.base = BaseBikkleModel(observation_space, params.base_params)
+
+        mlp_hidden_size = params.mlp_hidden_size
         self.mlp = nn.Sequential(
             nn.Linear(token_size, mlp_hidden_size),
             nn.ReLU(inplace=True),
-            nn.Linear(mlp_hidden_size, 1)  # Single output head
+            nn.Linear(mlp_hidden_size, 1)
         )
+
+        assert isinstance(observation_space, spaces.Dict)
+        observation_space = copy.deepcopy(observation_space)
+
 
     #     self.mlp.apply(self._init_weights)
     #
@@ -192,9 +204,14 @@ class BikkleValueFunction(nn.Module):
         # assert not torch.isinf(output).any(), "Inf detected in value prediction"
 
         return output
+
+@dataclass
+class BikkleActionValueFunctionParams:
+    base_params: BaseBikkleModelParams = BaseBikkleModelParams()
+    mlp_hidden_size: int = 128
+
 class BikkleActionValueFunction(nn.Module):
-    def __init__(self, observation_space: gym.spaces.Dict, action_space: gym.spaces.Box,
-                 token_size: int = 64, num_attention_heads: int = 4, mlp_hidden_size: int = 128) -> None:
+    def __init__(self, observation_space: gym.spaces.Dict, action_space: gym.spaces.Box, params: BikkleActionValueFunctionParams) -> None:
         super(BikkleActionValueFunction, self).__init__()
 
         assert isinstance(action_space, spaces.Box)
@@ -202,10 +219,9 @@ class BikkleActionValueFunction(nn.Module):
         observation_space = copy.deepcopy(observation_space)
         observation_space["action"] = action_space
 
-        self.base = BaseBikkleModel(observation_space, token_size=token_size,
-                                    num_attention_heads=num_attention_heads)
-
-        # Final MLP
+        self.base = BaseBikkleModel(observation_space, params.base_params)
+        token_size = params.base_params.token_size
+        mlp_hidden_size = params.mlp_hidden_size
         self.mlp = nn.Sequential(
             nn.Linear(token_size, mlp_hidden_size),
             nn.ReLU(),
@@ -243,24 +259,30 @@ LOG_STD_MAX = 2
 LOG_STD_MIN = -5
 
 
+@dataclass
+class BikklePolicyParams:
+    base_params: BaseBikkleModelParams = BaseBikkleModelParams()
+    mlp_hidden_size: int = 128
+
 class BikklePolicy(nn.Module):
-    def __init__(self, observation_space: gym.spaces.Dict, action_space: gym.spaces.Box,
-                 token_size: int = 64, num_attention_heads: int = 4, mlp_hidden_size: int = 128) -> None:
+    def __init__(self, observation_space: gym.spaces.Dict, action_space: gym.spaces.Box, params: BikklePolicyParams) -> None:
         super(BikklePolicy, self).__init__()
 
-        self.base = BaseBikkleModel(observation_space, token_size=token_size,
-                                    num_attention_heads=num_attention_heads)
+        token_size = params.base_params.token_size
+        mlp_hidden_size = params.mlp_hidden_size
+
+        self.base = BaseBikkleModel(observation_space, params.base_params)
 
         # Final MLP for Gaussian heads
         self.mean_head = nn.Sequential(
             nn.Linear(token_size, mlp_hidden_size),
             nn.ReLU(inplace=True),
-            nn.Linear(mlp_hidden_size, action_space.shape[0])  # Output mean for each action dimension
+            nn.Linear(mlp_hidden_size, action_space.shape[0])
         )
         self.log_std_head = nn.Sequential(
             nn.Linear(token_size, mlp_hidden_size),
             nn.ReLU(inplace=True),
-            nn.Linear(mlp_hidden_size, action_space.shape[0])  # Output log standard deviation for each action dimension
+            nn.Linear(mlp_hidden_size, action_space.shape[0])
         )
 
     #     for m in [self.mean_head, self.log_std_head]:
@@ -520,8 +542,13 @@ class SimplePolicy(nn.Module):
         return action, log_prob, mean
 
 
+@dataclass
+class BikkleSemanticImagePolicyParams:
+    cnn_channels: int = 32
+    mlp_hidden_size: int = 128
+
 class BikkleSemanticImagePolicy(nn.Module):
-    def __init__(self, image_size: int, action_space: gym.spaces.Box, cnn_channels: int = 32, mlp_hidden_size: int = 128):
+    def __init__(self, image_size: int, action_space: gym.spaces.Box, params: BikkleSemanticImagePolicyParams):
         """
         A CNN-based policy for processing 4-channel image observations.
 
@@ -534,25 +561,25 @@ class BikkleSemanticImagePolicy(nn.Module):
         super(BikkleSemanticImagePolicy, self).__init__()
 
         self.cnn = nn.Sequential(
-            nn.Conv2d(4, cnn_channels, kernel_size=3, stride=1, padding=1),  # Input: (4, image_size, image_size)
+            nn.Conv2d(4, params.cnn_channels, kernel_size=3, stride=1, padding=1),  # Input: (4, image_size, image_size)
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2, stride=2),  # Downsample by 2
-            nn.Conv2d(cnn_channels, cnn_channels * 2, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(params.cnn_channels, params.cnn_channels * 2, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2, stride=2),  # Downsample by 2
         )
 
         # Calculate the flattened size after the CNN layers
-        cnn_output_size = (image_size // 4) * (image_size // 4) * (cnn_channels * 2)
+        cnn_output_size = (image_size // 4) * (image_size // 4) * (params.cnn_channels * 2)
 
         self.mlp = nn.Sequential(
-            nn.Linear(cnn_output_size, mlp_hidden_size),
+            nn.Linear(cnn_output_size, params.mlp_hidden_size),
             nn.ReLU(),
         )
 
         # Output layers for Gaussian distribution
-        self.mean_head = nn.Linear(mlp_hidden_size, action_space.shape[0])
-        self.log_std_head = nn.Linear(mlp_hidden_size, action_space.shape[0])
+        self.mean_head = nn.Linear(params.mlp_hidden_size, action_space.shape[0])
+        self.log_std_head = nn.Linear(params.mlp_hidden_size, action_space.shape[0])
 
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -600,34 +627,31 @@ class BikkleSemanticImagePolicy(nn.Module):
 
         return action, log_prob, entropy
 
-class BikkleSemanticImageValue(nn.Module):
-    def __init__(self, image_size: int, cnn_channels: int = 32, mlp_hidden_size: int = 128):
-        """
-        A CNN-based value function for processing 4-channel image observations.
+@dataclass
+class BikkleSemanticImageValueParams:
+    cnn_channels: int = 32
+    mlp_hidden_size: int = 128
 
-        Args:
-            image_size (int): The width and height of the square input image.
-            cnn_channels (int): Number of output channels for the CNN layers.
-            mlp_hidden_size (int): Number of hidden units in the fully connected layers.
-        """
+class BikkleSemanticImageValue(nn.Module):
+    def __init__(self, image_size: int, params: BikkleSemanticImageValueParams):
         super(BikkleSemanticImageValue, self).__init__()
 
         self.cnn = nn.Sequential(
-            nn.Conv2d(4, cnn_channels, kernel_size=3, stride=1, padding=1),  # Input: (4, image_size, image_size)
+            nn.Conv2d(4, params.cnn_channels, kernel_size=3, stride=1, padding=1),  # Input: (4, image_size, image_size)
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2, stride=2),  # Downsample by 2
-            nn.Conv2d(cnn_channels, cnn_channels * 2, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(params.cnn_channels, params.cnn_channels * 2, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2, stride=2),  # Downsample by 2
         )
 
         # Calculate the flattened size after the CNN layers
-        cnn_output_size = (image_size // 4) * (image_size // 4) * (cnn_channels * 2)
+        cnn_output_size = (image_size // 4) * (image_size // 4) * (params.cnn_channels * 2)
 
         self.mlp = nn.Sequential(
-            nn.Linear(cnn_output_size, mlp_hidden_size),
+            nn.Linear(cnn_output_size, params.mlp_hidden_size),
             nn.ReLU(),
-            nn.Linear(mlp_hidden_size, 1)  # Single scalar output for value
+            nn.Linear(params.mlp_hidden_size, 1)
         )
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
