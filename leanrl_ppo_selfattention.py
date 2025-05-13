@@ -269,29 +269,43 @@ def save_model_checkpoint(policy_model, value_model, global_step, outdir, policy
     }
     torch.save(checkpoint, outdir / f"checkpoint_{global_step}.pth")
 
-def restore_models(observation_space, action_space, args, device):
+def restore_models(
+    observation_space: gym.Space,
+    action_space: gym.Space,
+    device: torch.device,
+    policy_params: BikklePolicyParams = BikklePolicyParams(),
+    value_params: BikkleValueFunctionParams = BikkleValueFunctionParams(),
+    checkpoint_to_load: Optional[Path] = None,
+
+) -> tuple[BikklePolicy, BikkleValueFunction]:
     """
-    Restores the policy and value models from a checkpoint or creates them from args.
+    Restores the policy and value models from a checkpoint or creates them from parameters.
 
     Args:
         observation_space (gym.Space): The observation space of the environment.
         action_space (gym.Space): The action space of the environment.
-        args (Args): The arguments containing model parameters and checkpoint path.
+        policy_params (BikklePolicyParams): The policy parameters.
+        value_params (BikkleValueFunctionParams): The value function parameters.
+        checkpoint_to_load (Optional[Path]): Path to the checkpoint file to load.
         device (torch.device): The device to load the models onto.
 
     Returns:
         tuple: A tuple containing the policy model and value model.
     """
+    # Load checkpoint if provided
+    if checkpoint_to_load:
+        checkpoint = torch.load(checkpoint_to_load, map_location=device, weights_only=False)
+        policy_params = checkpoint.get("policy_params", policy_params)
+        value_params = checkpoint.get("value_params", value_params)
 
     # Create the policy model
-    policy_model = BikklePolicy(observation_space=observation_space, action_space=action_space, params=args.policy_params).to(device)
+    policy_model = BikklePolicy(observation_space=observation_space, action_space=action_space, params=policy_params).to(device)
 
     # Create the value model
-    value_model = BikkleValueFunction(observation_space=observation_space, params=args.value_params).to(device)
+    value_model = BikkleValueFunction(observation_space=observation_space, params=value_params).to(device)
 
-    # Load checkpoint if provided
-    if args.checkpoint_to_load:
-        checkpoint = torch.load(args.checkpoint_to_load, map_location=device)
+    # Load model states if checkpoint is provided
+    if checkpoint_to_load:
         policy_model.load_state_dict(checkpoint["policy_state_dict"])
         value_model.load_state_dict(checkpoint["value_state_dict"])
 
@@ -349,7 +363,14 @@ if __name__ == "__main__":
     assert isinstance(obs_space, gym.spaces.Dict)
     assert isinstance(act_space, gym.spaces.Box)
 
-    policy_m, value_m = restore_models(observation_space=obs_space, action_space=act_space, args=args, device=device)
+    policy_m, value_m = restore_models(
+        observation_space=obs_space,
+        action_space=act_space,
+        policy_params=args.policy_params,
+        value_params=args.value_params,
+        checkpoint_to_load=args.checkpoint_to_load,
+        device=device,
+    )
 
     policy_m.train()
     # Make a version of agent with detached params
