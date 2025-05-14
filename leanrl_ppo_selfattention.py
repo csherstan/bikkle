@@ -107,6 +107,7 @@ class Args:
     value_params: BikkleValueFunctionParams = dataclasses.field(default_factory=BikkleValueFunctionParams)
 
     checkpoint_to_load: Optional[Path] = None
+    only_train_eye_tracking: bool = False
 
 
 def make_env(env_id, idx, capture_video, run_name, gamma, **kwargs):
@@ -236,7 +237,15 @@ def update(obs, actions, logprobs, advantages, returns, vals):
 
     loss.backward()
     gn = nn.utils.clip_grad_norm_(list(policy_m.parameters()) + list(value_m.parameters()), args.max_grad_norm)
+
+    print(policy_m.base.embedding_offsets.weight)
+    if args.only_train_eye_tracking:
+        # Zero out gradients for all entries of M except the third one
+        with torch.no_grad():
+            policy_m.base.embedding_offsets.weight.grad[:2] = 0
+            value_m.base.embedding_offsets.weight.grad[:2] = 0
     optimizer.step()
+    print(policy_m.base.embedding_offsets.weight)
 
     return approx_kl, v_loss.detach(), pg_loss.detach(), entropy_loss.detach(), old_approx_kl, clipfrac, gn
 
@@ -277,7 +286,7 @@ def restore_models(
     value_params: BikkleValueFunctionParams = BikkleValueFunctionParams(),
     checkpoint_to_load: Optional[Path] = None,
 
-) -> tuple[BikklePolicy, BikkleValueFunction]:
+) -> tuple[BikklePolicy, BikklePolicyParams, BikkleValueFunction, BikkleValueFunctionParams]:
     """
     Restores the policy and value models from a checkpoint or creates them from parameters.
 
@@ -309,7 +318,7 @@ def restore_models(
         policy_model.load_state_dict(checkpoint["policy_state_dict"])
         value_model.load_state_dict(checkpoint["value_state_dict"])
 
-    return policy_model, value_model
+    return policy_model, policy_params, value_model, value_params
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
@@ -365,7 +374,7 @@ if __name__ == "__main__":
     assert isinstance(obs_space, gym.spaces.Dict)
     assert isinstance(act_space, gym.spaces.Box)
 
-    policy_m, value_m = restore_models(
+    policy_m, policy_params, value_m, value_params = restore_models(
         observation_space=obs_space,
         action_space=act_space,
         policy_params=args.policy_params,
@@ -373,6 +382,9 @@ if __name__ == "__main__":
         checkpoint_to_load=args.checkpoint_to_load,
         device=device,
     )
+
+    args.policy_params = policy_params
+    args.value_params = value_params
 
     policy_m.train()
     # Make a version of agent with detached params
@@ -386,8 +398,18 @@ if __name__ == "__main__":
     value_inference_p.to_module(value_inference_m)
 
     ####### Optimizer #######
+
+    trainable_params = list(policy_m.parameters()) + list(value_m.parameters())
+    if args.only_train_eye_tracking:
+        # for the embedding_offsets we still need to go through and zero the grads for the non eye_tracking indices
+        trainable_params = []
+        trainable_params.extend(list(policy_m.base.embedding_offsets.parameters()))
+        trainable_params.extend(list(policy_m.base.tokenizer["eye_tracking"].parameters()))
+        trainable_params.extend(list(value_m.base.embedding_offsets.parameters()))
+        trainable_params.extend(list(value_m.base.tokenizer["eye_tracking"].parameters()))
+
     optimizer = optim.Adam(
-        list(policy_m.parameters()) + list(value_m.parameters()),
+        trainable_params,
         lr=torch.tensor(args.learning_rate, device=device),
         eps=1e-5,
         capturable=args.cudagraphs and not args.compile,
