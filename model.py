@@ -128,6 +128,10 @@ class BaseBikkleModel(nn.Module):
         indices_list.append(type_indices["block"])
         mask_list.append(mask["block"])
 
+        token_list.append(self.tokenizer["eye_tracking"](tokens["eye_tracking"]).unsqueeze(1))
+        indices_list.append(type_indices["eye_tracking"])
+        mask_list.append(mask["eye_tracking"])
+
         # Stack tokens and pass through self-attention
         tokens_tensor = torch.cat(token_list, dim=1)  # Shape: (batch_size, num_tokens, token_size)
         indices_tensor = torch.cat(indices_list, dim=1)  # Shape: (batch_size, num_tokens, token_size)

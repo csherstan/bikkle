@@ -1,3 +1,10 @@
+2025-05-15
+
+- I have wired in an approach that freezes the rest of the network and otherwise only trains
+the eyetracking embedding and tokenizer
+- I also created an ObservationWrapper with fake eyetracking data.
+- I am attempting to train by continuing from an existing model: https://wandb.ai/csherstan-team/ppo_continuous_action/runs/e0gcsfz5
+
 2025-05-12
 
 Overnight 2 runs crashed, it looks like they crashed at the same wallclock time. I'm thinking there is a GPU

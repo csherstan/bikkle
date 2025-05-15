@@ -512,6 +512,60 @@ gym.envs.registration.register(
     entry_point=lambda *args, **kwargs: generate_eye_tracking_env(*args, **kwargs),
 )
 
+
+class FakeEyeTrackingObservationWrapper(ObservationWrapper):
+    def __init__(self, env: gym.Env):
+        """
+        A wrapper that adds fake eye-tracking data to the observation.
+
+        Args:
+            env (gym.Env): The environment to wrap.
+        """
+        super().__init__(env)
+
+        assert isinstance(env, BikkleSelfAttentionWrapper)
+
+        self.base_env = env
+        while not isinstance(self.base_env, BikkleGymEnvironment):
+            self.base_env = env.env
+
+        assert isinstance(self.base_env, BikkleGymEnvironment)
+
+        original_obs_space = env.observation_space
+        self.observation_space = original_obs_space
+
+    def observation(self, observation):
+        """
+        Adds fake eye-tracking data to the observation.
+
+        Args:
+            observation (dict): The original observation.
+
+        Returns:
+            dict: The modified observation with fake eye-tracking data.
+        """
+        # Generate fake eye-tracking data in the range [-1, 1]
+        high_reward_block = self.base_env.pink_blocks[self.base_env.high_reward_block]
+        fake_eye_tracking = np.clip(high_reward_block + np.random.normal(loc=0.0, scale=0.05, size=2), 0, 1)
+
+        # Normalize the fake eye-tracking data to the range [-1, 1]
+        observation["tokens"]["eye_tracking"] = np.float32((fake_eye_tracking - 0.5)*2.0)
+
+        observation["mask"]["eye_tracking"] = np.array([0], dtype=np.bool_)  # Mark as present
+
+        return observation
+
+def generate_fake_eye_tracking_env(*args, **kwargs) ->  gym.Env:
+    env = BikkleGymEnvironment(*args, **kwargs)
+    env = BikkleSelfAttentionWrapper(env)
+    env = FakeEyeTrackingObservationWrapper(env)
+    return TimeLimit(env, max_episode_steps=200)
+
+gym.envs.registration.register(
+    id="BikkleFakeEyeTracking-v0",
+    entry_point=lambda *args, **kwargs: generate_fake_eye_tracking_env(*args, **kwargs),
+)
+
 class BikkleSemanticImageObservationWrapper(gym.ObservationWrapper):
     def __init__(self, env: gym.Env, image_size: int = 64):
         """

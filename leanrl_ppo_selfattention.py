@@ -238,14 +238,14 @@ def update(obs, actions, logprobs, advantages, returns, vals):
     loss.backward()
     gn = nn.utils.clip_grad_norm_(list(policy_m.parameters()) + list(value_m.parameters()), args.max_grad_norm)
 
-    print(policy_m.base.embedding_offsets.weight)
+    # print(policy_m.base.embedding_offsets.weight)
     if args.only_train_eye_tracking:
         # Zero out gradients for all entries of M except the third one
         with torch.no_grad():
             policy_m.base.embedding_offsets.weight.grad[:2] = 0
             value_m.base.embedding_offsets.weight.grad[:2] = 0
     optimizer.step()
-    print(policy_m.base.embedding_offsets.weight)
+    # print(policy_m.base.embedding_offsets.weight)
 
     return approx_kl, v_loss.detach(), pg_loss.detach(), entropy_loss.detach(), old_approx_kl, clipfrac, gn
 
