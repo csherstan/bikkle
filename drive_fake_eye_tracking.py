@@ -4,9 +4,9 @@ import numpy as np
 from env import generate_eye_tracking_env, generate_fake_eye_tracking_env, BikkleGymEnvironment
 import pygame
 
-
 # Initialize the environment
-env = generate_eye_tracking_env()
+# env = generate_eye_tracking_env()
+env = generate_fake_eye_tracking_env(uniform=True)
 obs, _ = env.reset()
 
 # Define movement mapping for arrow keys
@@ -25,8 +25,8 @@ running = True
 clock = pygame.time.Clock()
 
 # grab _human_image from the base environment, render it to the screen
-# pygame.display.init()
-# surface = pygame.display.set_mode((600, 600))
+pygame.display.init()
+surface = pygame.display.set_mode((600, 600))
 
 def denorm(data):
     return (data/2) + 0.5
@@ -48,16 +48,16 @@ while running:
     # Step the environment
     obs, reward, terminated, truncated, info = env.step(action)
 
-    # pygame.surfarray.blit_array(surface, base_env._human_image)
-    #
-    # # draw in eye_tracking token from obs as a small yellow circle
-    # eye_tracking = denorm(obs["tokens"]["eye_tracking"])
-    # eye_x = int(eye_tracking[0] * base_env._human_image.shape[1])
-    # eye_y = int(eye_tracking[1] * base_env._human_image.shape[0])
-    # pygame.draw.circle(pygame.display.get_surface(), (255, 255, 0), (eye_x, eye_y), 5)
-    #
-    # # show the image
-    # pygame.display.flip()
+    pygame.surfarray.blit_array(surface, base_env._human_image)
+
+    # draw in eye_tracking token from obs as a small yellow circle
+    eye_tracking = denorm(obs["tokens"]["eye_tracking"])
+    eye_x = int(eye_tracking[0] * base_env._human_image.shape[1])
+    eye_y = int(eye_tracking[1] * base_env._human_image.shape[0])
+    pygame.draw.circle(pygame.display.get_surface(), (255, 255, 0), (eye_x, eye_y), 5)
+
+    # show the image
+    pygame.display.flip()
 
 
     # Print reward if non-zero

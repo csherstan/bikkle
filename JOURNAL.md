@@ -1,3 +1,21 @@
+2025-05-16
+
+Plan for today:
+1. Figure out if the Fake Eye training data had any affect.
+2. I need to show that I can train with the Fake eye data in that the system behaves
+better with the data than without.
+  - Train from scratch
+  - Train using saved model, but allow updates over the whole model.
+  - Evaluation of /home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747314376_d1f485wz/checkpoint_1024000.pth
+    with fake eyetracking data: 2.06, without 1.215 average return. Unfortunately if I set the fake eyetracking data to
+    uniform (completely random over the space) I get an average return over 500 episodes of 2.36.
+3. Improve eye tracking performance a bit. I have not had much luck with this.
+
+- Using this model as my pretrained, no eyetracking data, model: /home/sherstancraig/work/maincode/data/BikkleSelfAttention-v0/leanrl_ppo_selfattention/1747171886_1hyxjahv/checkpoint_2969600.pth
+- Do I need to add step data as input to the model?
+- Would it help to increase the depth of the self-attention?
+
+
 2025-05-15
 
 - I have wired in an approach that freezes the rest of the network and otherwise only trains

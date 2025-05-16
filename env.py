@@ -10,7 +10,6 @@ import pygame
 from gymnasium.spaces import Sequence, Box, Dict
 from gymnasium.wrappers import TimeLimit
 
-import pygame
 from eyeGestures.utils import VideoCapture
 from eyeGestures import EyeGestures_v3
 
@@ -22,7 +21,8 @@ class BikkleGymEnvironment(gym.Env):
     render_modes = ["human", "rgb_array"]
     def __init__(self, default_pink_reward: float = 1.0, high_pink_reward: float = 5.0, cyan_penalty: float = -10.0,
                  screen_size: int = 600, num_blocks: int = 4, round_timeout: int = 100, max_action_size: float = 0.02,
-                 block_size: float = 0.04, shaping_reward=0.0, continuing=False, render_mode: str = "rgb_array") -> None:
+                 block_size: float = 0.04, shaping_reward=0.0, continuing=False, render_mode: str = "rgb_array",
+                 *args, **kwargs) -> None:
         super().__init__()
 
         assert block_size < 1.0
@@ -408,13 +408,14 @@ gym.envs.registration.register(
 
 class EyeTrackingObservationWrapper(ObservationWrapper):
 
-    def __init__(self, env: gym.Env):
+    def __init__(self, env: gym.Env, fps: int = 10, *args, **kwargs):
         assert isinstance(env, BikkleSelfAttentionWrapper)
         super().__init__(env)
         original_obs_space = env.observation_space
 
         self.gestures = EyeGestures_v3()
         self.cap = VideoCapture(2)
+        self.fps = fps
 
         self.observation_space = original_obs_space
 
@@ -424,14 +425,16 @@ class EyeTrackingObservationWrapper(ObservationWrapper):
 
         x_offset = (self.screen_width - self.screen_height) // 2
         y_offset = 0
-        # os.environ['SDL_VIDEO_WINDOW_POS'] = f"{x_offset},{y_offset}"
 
 
-        self.window = pygame.display.set_mode((self.screen_height, self.screen_height), pygame.NOFRAME)
+        self.window = pygame.display.set_mode((self.screen_width, self.screen_height), pygame.FULLSCREEN)
 
         self.gestures.setFixation(1.0)
 
-        self.calibrate(20)
+        self.last_eye_tracking = np.array([0, 0], dtype=np.float32)
+        self.last_event_point = None
+
+        self.calibrate(30)
         self.clock = pygame.time.Clock()
 
         self.base_env = self.env
@@ -456,29 +459,44 @@ class EyeTrackingObservationWrapper(ObservationWrapper):
         while iterator < count:
             self.window.fill((0, 0, 0))  # Clear the window with black
             ret, frame = self.cap.read()
-            event, cevent = self.gestures.step(frame,
-                                               True,
-                                               self.screen_width,
-                                               self.screen_height,
-                                               context="my_context")
-            pygame.draw.circle(self.window, BLUE, cevent.point, cevent.acceptance_radius)
-            pygame.draw.circle(self.window, RED, cevent.point, 50)
-            if not np.array_equal(cevent.point, prev):
-                iterator += 1
-                prev = cevent.point
-            pygame.draw.circle(self.window, GREEN, event.point, 50)
-            pygame.display.flip()
+            try:
+                event, cevent = self.gestures.step(frame,
+                                                   True,
+                                                   self.screen_width,
+                                                   self.screen_height,
+                                                   context="my_context")
+                pygame.draw.circle(self.window, BLUE, cevent.point, cevent.acceptance_radius)
+                pygame.draw.circle(self.window, RED, cevent.point, 50)
+                if not np.array_equal(cevent.point, prev):
+                    iterator += 1
+                    prev = cevent.point
+                pygame.draw.circle(self.window, GREEN, event.point, 50)
+                pygame.display.flip()
+            except:
+                pass
+        self.window.fill((0, 0, 0))  # Clear the window with black
+        self.last_event_point = None
+        self.last_eye_tracking = np.array([0, 0], dtype=np.float32)
 
 
 
     def observation(self, observation):
         ret, frame = self.cap.read()
         # already calibrated before running.
-        event, _ = self.gestures.step(frame, False, self.screen_width, self.screen_height, context="my_context")
-        observation["tokens"]["eye_tracking"] = np.array([
-            2 * (event.point[0] / self.screen_width) - 1,
-            2 * (event.point[1] / self.screen_height) - 1
-        ], dtype=np.float32)
+
+        eye_tracking = self.last_eye_tracking
+        try:
+            event, _ = self.gestures.step(frame, False, self.screen_width, self.screen_height, context="my_context")
+            self.last_event_point = event.point
+            eye_tracking = np.array([
+                2 * (event.point[0] / self.screen_width) - 1,
+                2 * (event.point[1] / self.screen_height) - 1
+            ], dtype=np.float32)
+        except:
+            pass
+
+        observation["tokens"]["eye_tracking"] = eye_tracking
+
         observation["mask"]["eye_tracking"] = np.array([0], dtype=np.bool_)
         return observation
 
@@ -489,14 +507,30 @@ class EyeTrackingObservationWrapper(ObservationWrapper):
     def step(self, action):
         obs, reward, truncated, terminated, info = super().step(action)
 
-        pygame.surfarray.blit_array(self.window, self.base_env._human_image)
+        self.window.fill((0, 0, 0))  # Clear the window with black
         window_width, window_height = self.window.get_size()
-        image_width, image_height = self.env._human_image.shape[:2]
+
+        scaled_image = pygame.transform.scale(
+            pygame.surfarray.make_surface(self.base_env._human_image),
+            (min(self.screen_width, self.screen_height), min(self.screen_width, self.screen_height))
+        )
+
+        image_width, image_height = scaled_image.get_size()
         x_offset = (window_width - image_width) // 2
         y_offset = (window_height - image_height) // 2
-        self.window.blit(pygame.surfarray.make_surface(self.env._human_image), (x_offset, y_offset))
+        pygame.draw.rect(self.window, (255, 255, 255), (x_offset, y_offset, image_width, image_height),
+                         2)  # White frame
 
-        self.clock.tick(10)
+        self.window.blit(scaled_image, (x_offset, y_offset))
+
+        if self.last_event_point is not None:
+            # draw a red crosshair at the last event point
+            pygame.draw.line(self.window, (255, 0, 0), (self.last_event_point[0] - 10, self.last_event_point[1]),
+                             (self.last_event_point[0] + 10, self.last_event_point[1]), 2)
+            pygame.draw.line(self.window, (255, 0, 0), (self.last_event_point[0], self.last_event_point[1] - 10),
+                             (self.last_event_point[0], self.last_event_point[1] + 10), 2)
+
+        self.clock.tick(self.fps)
         pygame.display.flip()
 
         return obs, reward, truncated, terminated, info
@@ -504,7 +538,7 @@ class EyeTrackingObservationWrapper(ObservationWrapper):
 def generate_eye_tracking_env(*args, **kwargs) ->  gym.Env:
     env = BikkleGymEnvironment(*args, **kwargs)
     env = BikkleSelfAttentionWrapper(env)
-    env = EyeTrackingObservationWrapper(env)
+    env = EyeTrackingObservationWrapper(env, *args, **kwargs)
     return TimeLimit(env, max_episode_steps=200)
 
 gym.envs.registration.register(
@@ -514,18 +548,21 @@ gym.envs.registration.register(
 
 
 class FakeEyeTrackingObservationWrapper(ObservationWrapper):
-    def __init__(self, env: gym.Env):
+    def __init__(self, env: gym.Env, uniform: bool = False, *args, **kwargs):
         """
         A wrapper that adds fake eye-tracking data to the observation.
 
         Args:
             env (gym.Env): The environment to wrap.
+            uniform: If True, the face eye-tracking data is generated uniformly otherwise it is Gaussian centered on
+            the high reward block.
         """
         super().__init__(env)
 
         assert isinstance(env, BikkleSelfAttentionWrapper)
 
         self.base_env = env
+        self.uniform = uniform
         while not isinstance(self.base_env, BikkleGymEnvironment):
             self.base_env = env.env
 
@@ -545,7 +582,10 @@ class FakeEyeTrackingObservationWrapper(ObservationWrapper):
             dict: The modified observation with fake eye-tracking data.
         """
         # Generate fake eye-tracking data in the range [-1, 1]
-        high_reward_block = self.base_env.pink_blocks[self.base_env.high_reward_block]
+        if self.uniform:
+            high_reward_block = np.random.uniform(0, 1, size=(2, ))
+        else:
+            high_reward_block = self.base_env.pink_blocks[self.base_env.high_reward_block]
         fake_eye_tracking = np.clip(high_reward_block + np.random.normal(loc=0.0, scale=0.05, size=2), 0, 1)
 
         # Normalize the fake eye-tracking data to the range [-1, 1]
@@ -558,12 +598,17 @@ class FakeEyeTrackingObservationWrapper(ObservationWrapper):
 def generate_fake_eye_tracking_env(*args, **kwargs) ->  gym.Env:
     env = BikkleGymEnvironment(*args, **kwargs)
     env = BikkleSelfAttentionWrapper(env)
-    env = FakeEyeTrackingObservationWrapper(env)
+    env = FakeEyeTrackingObservationWrapper(env, *args, **kwargs)
     return TimeLimit(env, max_episode_steps=200)
 
 gym.envs.registration.register(
     id="BikkleFakeEyeTracking-v0",
     entry_point=lambda *args, **kwargs: generate_fake_eye_tracking_env(*args, **kwargs),
+)
+
+gym.envs.registration.register(
+    id="BikkleFakeEyeTracking-v0-uniform",
+    entry_point=lambda *args, **kwargs: generate_fake_eye_tracking_env(*args, **kwargs, uniform=True),
 )
 
 class BikkleSemanticImageObservationWrapper(gym.ObservationWrapper):

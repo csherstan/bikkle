@@ -13,13 +13,24 @@ from model import BikklePolicy, BikklePolicyParams, BikkleValueFunctionParams
 
 # Load the saved policy model
 model_path = Path(
-    "/home/sherstancraig/work/maincode/data/BikkleSelfAttention-v0/leanrl_ppo_selfattention/1747086951_4bctbavk/checkpoint_2969600.pth")
+    "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747314376_d1f485wz/checkpoint_1024000.pth")
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = "cpu"
 
+# env_name = "BikkleFakeEyeTracking-v0"
+env_name = "BikkleEyeTracking-v0"
+
 # Initialize the environment
-env = make_env("BikkleSelfAttention-v0", 0, capture_video=False, run_name="", gamma=0.99, render_mode="human",
-               continuing=True, num_blocks=4)()
+# env = make_env(env_name, 0, capture_video=False, run_name="", gamma=0.99, render_mode="human",
+#                continuing=True, num_blocks=4)()
+env = make_env(env_name, 0,
+               capture_video=False,
+               run_name="",
+               gamma=0.99,
+               continuing=True,
+               num_blocks=4,
+               fps=10,
+               )()
 # base_env = BikkleGymEnvironment()
 # env = FlatBikkleGymEnvironmentWrapper(base_env)
 # env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
@@ -42,7 +53,7 @@ obs_space = env.observation_space
 action_space = env.action_space
 
 # Load the policy model
-agent, _ = restore_models(observation_space=obs_space,
+agent, *(_) = restore_models(observation_space=obs_space,
                           action_space=action_space, device=device, checkpoint_to_load=model_path)
 agent.eval()
 policy = agent.get_action
