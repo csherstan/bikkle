@@ -329,16 +329,19 @@ class BikkleSelfAttentionWrapper(gym.ObservationWrapper):
                 "agent_position": Box(low=0, high=1, shape=(2,), dtype=np.float32),
                 "block": Box(low=-1, high=1, shape=(max_blocks, 3), dtype=np.float32),
                 "eye_tracking": Box(low=-1, high=1, shape=(2,), dtype=np.float32),
+                "steps": Box(low=-1, high=1., shape=(1,), dtype=np.float32),
             }),
             "indices": Dict({
-                "agent_position": Box(low=0, high=0, shape=(1,), dtype=np.int64),
-                "block": Box(low=1, high=1, shape=(max_blocks,), dtype=np.int64),
-                "eye_tracking": Box(low=2, high=2, shape=(1,), dtype=np.int64),
+                "agent_position": Box(low=data_type_idx["agent_position"], high=data_type_idx["agent_position"], shape=(1,), dtype=np.int64),
+                "block": Box(low=data_type_idx["block"], high=data_type_idx["block"], shape=(max_blocks,), dtype=np.int64),
+                "eye_tracking": Box(low=data_type_idx["eye_tracking"], high=data_type_idx["eye_tracking"], shape=(1,), dtype=np.int64),
+                "steps": Box(low=data_type_idx["steps"], high=data_type_idx["steps"], shape=(1,), dtype=np.int64),
             }),
             "mask": Dict({
                 "agent_position": Box(low=0, high=1, shape=(1,), dtype=np.bool_),
                 "block": Box(low=0, high=1, shape=(max_blocks,), dtype=np.bool_),
                 "eye_tracking": Box(low=0, high=1, shape=(1,), dtype=np.bool_),
+                "steps": Box(low=0, high=1, shape=(1,), dtype=np.bool_),
             }),
         })
 
@@ -371,10 +374,14 @@ class BikkleSelfAttentionWrapper(gym.ObservationWrapper):
         eye_tracking = np.zeros((2,), dtype=np.float32)
         eye_tracking_mask = np.ones((1,), dtype=np.bool_)  # Mark as absent
 
+        steps = (np.float32(observation["steps"]) - 0.5)*2.0
+        steps_mask = np.ones((1,), dtype=np.bool_)  # Mark as absent
+
         # Indices
         agent_position_index = np.array([data_type_idx["agent_position"]], dtype=np.int64)
         block_indices = np.full((self.max_blocks,), data_type_idx["block"], dtype=np.int64)
         eye_tracking_index = np.array([data_type_idx["eye_tracking"]], dtype=np.int64)
+        steps_index = np.array([data_type_idx["steps"]], dtype=np.int64)
 
         # Combine into the final observation
         return {
@@ -382,16 +389,19 @@ class BikkleSelfAttentionWrapper(gym.ObservationWrapper):
                 "agent_position": agent_position,
                 "block": padded_blocks,
                 "eye_tracking": eye_tracking,
+                "steps": steps,
             },
             "indices": {
                 "agent_position": agent_position_index,
                 "block": block_indices,
                 "eye_tracking": eye_tracking_index,
+                "steps": steps_index,
             },
             "mask": {
                 "agent_position": np.array([0], dtype=np.bool_),  # Always present
                 "block": block_mask,
                 "eye_tracking": eye_tracking_mask,
+                "steps": steps_mask,
             },
         }
 
@@ -587,11 +597,12 @@ class FakeEyeTrackingObservationWrapper(ObservationWrapper):
         else:
             high_reward_block = self.base_env.pink_blocks[self.base_env.high_reward_block]
         fake_eye_tracking = np.clip(high_reward_block + np.random.normal(loc=0.0, scale=0.05, size=2), 0, 1)
-
-        # Normalize the fake eye-tracking data to the range [-1, 1]
         observation["tokens"]["eye_tracking"] = np.float32((fake_eye_tracking - 0.5)*2.0)
 
-        observation["mask"]["eye_tracking"] = np.array([0], dtype=np.bool_)  # Mark as present
+        # Normalize the fake eye-tracking data to the range [-1, 1]
+        if np.random.uniform() > 0.5:
+            observation["mask"]["eye_tracking"] = np.array([0], dtype=np.bool_)  # Mark as present
+            observation["mask"]["steps"] = np.array([0], dtype=np.bool_)  # Mark as present
 
         return observation
 

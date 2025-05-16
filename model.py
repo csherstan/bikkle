@@ -10,6 +10,17 @@ from gymnasium.spaces import Sequence
 import gymnasium as gym
 from dataclasses import dataclass
 
+from torch.nn import TransformerEncoderLayer, TransformerEncoder
+
+data_type_idx = {
+    "agent_position": 0,
+    "block": 1,
+    "eye_tracking": 2,
+    "action": 3,
+    "face": 4,
+    "steps": 5,
+}
+
 def create_sinusoidal_embedding(num_positions: int, embedding_dim: int) -> nn.Parameter:
     position = torch.arange(num_positions).unsqueeze(1)  # Shape: (num_positions, 1)
     div_term = torch.exp(torch.arange(0, embedding_dim, 2) * -(math.log(10000.0) / embedding_dim))
@@ -26,11 +37,25 @@ def assert_is_inf(x: dict[str, torch.Tensor]) -> None:
     for key, value in x.items():
         assert not torch.isinf(value).any(), f"Inf detected in {key}"
 
+def activation_fn(name: str) -> nn.Module:
+    if name == "relu":
+        activation = nn.ReLU()
+    elif name == "gelu":
+        activation = nn.GELU()
+    else:
+        raise ValueError(f"Unknown activation function: {name}")
+    return activation
+
 
 @dataclass
 class BaseBikkleModelParams:
+    """
+    This is being used for both BaseBikkleModel and BaseBikkle2Model-> Not clean, but I didn't want to deal with
+    clever config right now
+    """
     token_size: int = 64
     num_attention_heads: int = 4
+    num_layers: int = 1  # Number of TransformerEncoder layers
 
 class BaseBikkleModel(nn.Module):
     def __init__(self, observation_space: gym.spaces.Dict, params: BaseBikkleModelParams):
@@ -150,10 +175,93 @@ class BaseBikkleModel(nn.Module):
 
         return aggregated_tokens
 
+class BaseBikkle2Model(nn.Module):
+    def __init__(self, observation_space: gym.spaces.Dict, params: BaseBikkleModelParams):
+        super(BaseBikkle2Model, self).__init__()
+
+        num_obs_types = len(data_type_idx)
+        token_size = params.token_size
+        num_attention_heads = params.num_attention_heads
+        num_layers = params.num_layers
+
+        # Embedding offsets for observations and actions
+        self.embedding_offsets = nn.Embedding(num_obs_types, token_size)
+
+        # Pre-attention LayerNorm (pre-norm style)
+        self.pre_attention_ln = nn.LayerNorm(token_size)
+
+
+        def make_one_embedding(space):
+            if isinstance(space, Sequence):
+                space = space.feature_space
+
+            return nn.Linear(space.shape[-1], token_size)
+
+        token_dict = {
+            key: make_one_embedding(space)
+            for key, space in observation_space["tokens"].items()
+        }
+
+        # MLPs for each observation key to map to token size
+        self.tokenizer = nn.ModuleDict(token_dict)
+
+        # Transformer Encoder
+        encoder_layer = TransformerEncoderLayer(
+            d_model=token_size,
+            nhead=num_attention_heads,
+            dim_feedforward=4 * token_size,  # Feedforward dimension
+            activation="gelu",  # Use gelu activation
+            batch_first=True
+        )
+        self.transformer_encoder = TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        # Post-residual LayerNorm
+        self.post_attention_layer_norm = nn.LayerNorm(token_size)
+
+    def forward(self, tokens: dict[str, torch.Tensor], type_indices: dict[str, torch.Tensor],
+                mask: dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Forward pass for the BaseBikkleModel.
+
+        :param tokens: A tensor of shape (batch_size, num_tokens, token_size) representing the input tokens.
+        :param type_indices: Corresponding indices for the tokens for the embedding type. Shape (batch_size, num_tokens).
+        :param mask: A tensor of shape (batch_size, num_tokens) representing the key padding mask.
+        :return: Aggregated tokens of shape (batch_size, token_size).
+        """
+        token_list = []
+        indices_list = []
+        mask_list = []
+
+        # Process each observation key
+        for key in tokens.keys():
+            token = self.tokenizer[key](tokens[key])
+            if len(token.shape) == 2:
+                token = token.unsqueeze(1)
+            token_list.append(token)
+            indices_list.append(type_indices[key])
+            mask_list.append(mask[key])
+
+        # Stack tokens and pass through TransformerEncoder
+        tokens_tensor = torch.cat(token_list, dim=1)  # Shape: (batch_size, num_tokens, token_size)
+        indices_tensor = torch.cat(indices_list, dim=1)  # Shape: (batch_size, num_tokens)
+        mask_tensor = torch.cat(mask_list, dim=1)  # Shape: (batch_size, num_tokens)
+
+        tokens_tensor = tokens_tensor + self.embedding_offsets(indices_tensor)
+        # tokens_tensor = self.pre_attention_ln(tokens_tensor)
+
+        # Pass through TransformerEncoder
+        tokens_tensor = self.transformer_encoder(tokens_tensor, src_key_padding_mask=mask_tensor) # [batch, num_tokens, token_size]
+
+        # Aggregate tokens
+        aggregated_tokens = tokens_tensor.sum(dim=1)  # Shape: (batch_size, token_size)
+
+        return aggregated_tokens
+
 
 @dataclass
 class BikkleValueFunctionParams:
     base_params: BaseBikkleModelParams = BaseBikkleModelParams()
+    activation: str = "relu"
     mlp_hidden_size: int = 128
 
 class BikkleValueFunction(nn.Module):
@@ -165,53 +273,36 @@ class BikkleValueFunction(nn.Module):
 
         token_size = params.base_params.token_size
 
-        self.base = BaseBikkleModel(observation_space, params.base_params)
+        if params.base_params.num_layers > 1:
+            self.base = BaseBikkle2Model(observation_space, params.base_params)
+        else:
+            self.base = BaseBikkleModel(observation_space, params.base_params)
 
         mlp_hidden_size = params.mlp_hidden_size
         self.mlp = nn.Sequential(
             nn.Linear(token_size, mlp_hidden_size),
-            nn.ReLU(inplace=True),
+            activation_fn(params.activation),
             nn.Linear(mlp_hidden_size, 1)
         )
 
         assert isinstance(observation_space, spaces.Dict)
-        observation_space = copy.deepcopy(observation_space)
-
-
-    #     self.mlp.apply(self._init_weights)
-    #
-    # def _init_weights(self, module):
-    #     if isinstance(module, nn.Linear):
-    #         gain = math.sqrt(2) if module in self.mlp[0:1] else 1.0
-    #         nn.init.xavier_uniform_(module.weight, gain=gain)
-    #         nn.init.zeros_(module.bias)
 
 
     def get_value(self, observations: dict[str, dict[torch.Tensor]]) -> torch.Tensor:
         tokens = observations["tokens"]
         indices = observations["indices"]
         mask = observations["mask"]
-        # assert_is_nan(tokens)
-        # assert_is_inf(tokens)
-        # assert_is_nan(indices)
-        # assert_is_inf(indices)
-        # assert_is_nan(mask)
-        # assert_is_inf(mask)
-        # assert not torch.isnan(action).any(), "Nan detected in value action"
-        # assert not torch.isinf(action).any(), "Inf detected in value action"
 
         aggregated_tokens = self.base(tokens, indices, mask)
 
         output = self.mlp(aggregated_tokens)
-
-        # assert not torch.isnan(output).any(), "Nan detected in value prediction"
-        # assert not torch.isinf(output).any(), "Inf detected in value prediction"
 
         return output
 
 @dataclass
 class BikkleActionValueFunctionParams:
     base_params: BaseBikkleModelParams = BaseBikkleModelParams()
+    activation: str = "relu"
     mlp_hidden_size: int = 128
 
 class BikkleActionValueFunction(nn.Module):
@@ -226,6 +317,8 @@ class BikkleActionValueFunction(nn.Module):
         self.base = BaseBikkleModel(observation_space, params.base_params)
         token_size = params.base_params.token_size
         mlp_hidden_size = params.mlp_hidden_size
+
+
         self.mlp = nn.Sequential(
             nn.Linear(token_size, mlp_hidden_size),
             nn.ReLU(),
@@ -237,14 +330,6 @@ class BikkleActionValueFunction(nn.Module):
         tokens = observations["tokens"]
         indices = observations["indices"]
         mask = observations["mask"]
-        # assert_is_nan(tokens)
-        # assert_is_inf(tokens)
-        # assert_is_nan(indices)
-        # assert_is_inf(indices)
-        # assert_is_nan(mask)
-        # assert_is_inf(mask)
-        # assert not torch.isnan(action).any(), "Nan detected in value action"
-        # assert not torch.isinf(action).any(), "Inf detected in value action"
 
         tokens["action"] = torch.unsqueeze(action, dim=1)
         indices["action"] = torch.full((action.shape[0], 1), data_type_idx["action"], dtype=torch.long, device=action.device)
@@ -252,9 +337,6 @@ class BikkleActionValueFunction(nn.Module):
         aggregated_tokens = self.base(tokens, indices, mask)
 
         output = self.mlp(aggregated_tokens)
-
-        # assert not torch.isnan(output).any(), "Nan detected in value prediction"
-        # assert not torch.isinf(output).any(), "Inf detected in value prediction"
 
         return output
 
@@ -267,6 +349,8 @@ LOG_STD_MIN = -5
 class BikklePolicyParams:
     base_params: BaseBikkleModelParams = BaseBikkleModelParams()
     mlp_hidden_size: int = 128
+    activation: str = "relu"
+    dropout: float = 0.1
 
 class BikklePolicy(nn.Module):
     def __init__(self, observation_space: gym.spaces.Dict, action_space: gym.spaces.Box, params: BikklePolicyParams) -> None:
@@ -275,28 +359,24 @@ class BikklePolicy(nn.Module):
         token_size = params.base_params.token_size
         mlp_hidden_size = params.mlp_hidden_size
 
-        self.base = BaseBikkleModel(observation_space, params.base_params)
+        if params.base_params.num_layers == 1:
+            self.base = BaseBikkleModel(observation_space, params.base_params)
+        else:
+            self.base = BaseBikkle2Model(observation_space, params.base_params)
 
         # Final MLP for Gaussian heads
         self.mean_head = nn.Sequential(
             nn.Linear(token_size, mlp_hidden_size),
-            nn.ReLU(inplace=True),
+            activation_fn(params.activation),
+            nn.Dropout(params.dropout),
             nn.Linear(mlp_hidden_size, action_space.shape[0])
         )
         self.log_std_head = nn.Sequential(
             nn.Linear(token_size, mlp_hidden_size),
-            nn.ReLU(inplace=True),
+            activation_fn(params.activation),
+            nn.Dropout(params.dropout),
             nn.Linear(mlp_hidden_size, action_space.shape[0])
         )
-
-    #     for m in [self.mean_head, self.log_std_head]:
-    #         m.apply(self._init_weights)
-    #
-    # def _init_weights(self, module):
-    #     if isinstance(module, nn.Linear):
-    #         gain = math.sqrt(2) if module in [self.mean_head[0:1], self.log_std_head] else 1.0
-    #         nn.init.xavier_uniform_(module.weight, gain=gain)
-    #         nn.init.zeros_(module.bias)
 
     def forward(self, obs) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -351,16 +431,6 @@ class BikklePolicy(nn.Module):
         if action is None:
             action = mean + std * torch.randn_like(mean)
         return action, normal.log_prob(action).sum(1), normal.entropy().sum(1)
-
-
-data_type_idx = {
-    "agent_position": 0,
-    "block": 1,
-    "eye_tracking": 2,
-    "action": 3,
-    "face": 4,
-    "screen_image": 5  # do not use
-}
 
 
 def preprocess_bikkle_observation_with_mask(
@@ -684,3 +754,4 @@ class BikkleSemanticImageValue(nn.Module):
             torch.Tensor: Scalar value for each observation in the batch.
         """
         return self.forward(obs)
+
