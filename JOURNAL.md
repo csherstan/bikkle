@@ -1,3 +1,36 @@
+2025-05-17
+- I trained a model using 2 layers of self-attention for 4M steps. It has achieved much higher performance than
+previously observed: https://wandb.ai/csherstan-team/ppo_continuous_action/runs/piacxpqy. It was trained with fake eyetracking
+data.
+ - it's reached around 0.08 reward/step.
+
+In terms of improving model training I'm thinking of the following:
+- the mean_entropy_loss continues to be clipping for all these models at the high-entropy bound. Surely that must be
+somewhat problematic.
+- reduce gamma. Try something like 0.95?
+- get rid of the reduction of the value of the high value block and drop the "steps" field. Given that I am
+truncating the episode when a pellet gets touched, there should be no bootstrapping beyond this point. I could do
+the usual thing of adding a negative on each step.
+
+It works!!! https://wandb.ai/csherstan-team/ppo_continuous_action/runs/piacxpqy
+I was able to use my own eyetracking data and have it clearly making decisions based on where I was looking. I could
+change the direction of movement by changing where I was looking.
+When I rerun the model without the eyetracking data it is still able to sort of do the task, but much worse than
+what I was seeing before. I think there's an imbalance here with training.
+Also, looking at this interaction more, it seems that the system has mostly learned to follow the eyetracking data
+rather than go for the pellet.
+
+
+Next:
+- the real eye tracking is mapping only onto the game surface instead of the whole screen, which is problematic.
+- need to confirm the agent still works when no eye tracking data is present.
+- I want to separate the rate of screen update from the step update.
+- save eyetracking calibration data
+
+1747399171_piacxpqy continues 1747370163_80dcr9mx. However, 1747370163_80dcr9mx seems to be better.
+
+I ended up recording video from the wrong video - it's good enough, but I'd like to try again.
+
 2025-05-16
 
 Plan for today:

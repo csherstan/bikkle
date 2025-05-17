@@ -12,18 +12,16 @@ from leanrl_ppo_selfattention import make_env, restore_models
 from model import BikklePolicy, BikklePolicyParams, BikkleValueFunctionParams
 
 # Load the saved policy model
-model_path = Path(
-    "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747314376_d1f485wz/checkpoint_1024000.pth")
+# model_path = "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747399171_piacxpqy/checkpoint_614400.pth"
+# model_path = "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747399171_piacxpqy/checkpoint_51200.pth"
+model_path = "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747370163_80dcr9mx/checkpoint_1792000.pth"
+model_path = "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747399171_piacxpqy/checkpoint_1996800.pth"
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = "cpu"
 
-# env_name = "BikkleFakeEyeTracking-v0"
-env_name = "BikkleEyeTracking-v0"
+model_path = Path(model_path)
 
-# Initialize the environment
-# env = make_env(env_name, 0, capture_video=False, run_name="", gamma=0.99, render_mode="human",
-#                continuing=True, num_blocks=4)()
-env = make_env(env_name, 0,
+env = make_env("BikkleEyeTracking-v0", 0,
                capture_video=False,
                run_name="",
                gamma=0.99,
@@ -31,6 +29,20 @@ env = make_env(env_name, 0,
                num_blocks=4,
                fps=10,
                )()
+# env = make_env("BikkleSelfAttention-v0", 0,
+#                capture_video=False,
+#                run_name="",
+#                gamma=0.99,
+#                continuing=True,
+#                num_blocks=4,
+#                fps=10,
+#                render_mode="human",
+#                )()
+
+# Initialize the environment
+# env = make_env(env_name, 0, capture_video=False, run_name="", gamma=0.99, render_mode="human",
+#                continuing=True, num_blocks=4)()
+
 # base_env = BikkleGymEnvironment()
 # env = FlatBikkleGymEnvironmentWrapper(base_env)
 # env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
@@ -73,7 +85,7 @@ while running:
     obs, reward, terminated, truncated, info = envs.step(action)
 
     if reward != 0:
-        print(f"Reward: {reward}")
+        print(f"Reward: {info['reward']}")
 
     # Render the environment
     base_env.render()
