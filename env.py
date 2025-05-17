@@ -148,7 +148,6 @@ class BikkleGymEnvironment(gym.Env):
                 self.pink_blocks[i] = self._generate_new_block(np.vstack((self.cyan_blocks, self.pink_blocks)))
                 if i == self.high_reward_block:
                     reward += max(self.default_pink_reward, self.high_pink_reward * (self.round_timeout - self.round_steps_count) / self.round_timeout)
-                    print(reward)
                     self.high_reward_block = random.choice(range(len(self.pink_blocks)))
                 else:
                     reward += self.default_pink_reward
