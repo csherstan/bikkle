@@ -47,7 +47,7 @@ def activation_fn(name: str) -> nn.Module:
     return activation
 
 
-@dataclass
+@dataclass(frozen=True)
 class BaseBikkleModelParams:
     """
     This is being used for both BaseBikkleModel and BaseBikkle2Model-> Not clean, but I didn't want to deal with
@@ -258,7 +258,7 @@ class BaseBikkle2Model(nn.Module):
         return aggregated_tokens
 
 
-@dataclass
+@dataclass(frozen=True)
 class BikkleValueFunctionParams:
     base_params: BaseBikkleModelParams = BaseBikkleModelParams()
     activation: str = "relu"
@@ -299,7 +299,7 @@ class BikkleValueFunction(nn.Module):
 
         return output
 
-@dataclass
+@dataclass(frozen=True)
 class BikkleActionValueFunctionParams:
     base_params: BaseBikkleModelParams = BaseBikkleModelParams()
     activation: str = "relu"
@@ -345,7 +345,7 @@ LOG_STD_MAX = 2
 LOG_STD_MIN = -5
 
 
-@dataclass
+@dataclass(frozen=True)
 class BikklePolicyParams:
     base_params: BaseBikkleModelParams = BaseBikkleModelParams()
     mlp_hidden_size: int = 128
