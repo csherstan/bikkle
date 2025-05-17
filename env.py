@@ -320,7 +320,7 @@ class AddNegativeObservationWrapper(ObservationWrapper):
 
 
 class BikkleSelfAttentionWrapper(gym.ObservationWrapper):
-    def __init__(self, env: gym.Env):
+    def __init__(self, env: gym.Env, *args, **kwargs):
         super().__init__(env)
         assert isinstance(env, BikkleGymEnvironment)
         self.max_blocks = max_blocks = env.num_blocks
@@ -432,10 +432,11 @@ class EyeTrackingObservationWrapper(ObservationWrapper):
         self.screen_info = pygame.display.Info()
         self.screen_width = self.screen_info.current_w
         self.screen_height = self.screen_info.current_h
-
-        x_offset = (self.screen_width - self.screen_height) // 2
-        y_offset = 0
-
+        self.image_size = min(self.screen_width, self.screen_height)
+        self.image_left_edge = (self.screen_width - self.image_size) / 2
+        self.image_right_edge = self.image_left_edge + self.image_size
+        self.image_top_edge = (self.screen_height - self.image_size) / 2
+        self.image_bottom_edge = self.image_top_edge + self.image_size
 
         self.window = pygame.display.set_mode((self.screen_width, self.screen_height), pygame.FULLSCREEN)
 
@@ -444,7 +445,7 @@ class EyeTrackingObservationWrapper(ObservationWrapper):
         self.last_eye_tracking = np.array([0, 0], dtype=np.float32)
         self.last_event_point = None
 
-        self.calibrate(30)
+        self.calibrate(20)
         self.clock = pygame.time.Clock()
 
         self.base_env = self.env
@@ -452,9 +453,8 @@ class EyeTrackingObservationWrapper(ObservationWrapper):
             self.base_env = self.base_env.env
 
     def calibrate(self, count: int) -> None:
-
-        x = np.arange(0, 1.1, 0.2)
-        y = np.arange(0, 1.1, 0.2)
+        x = np.linspace(self.image_left_edge / self.screen_width, self.image_right_edge / self.screen_width, num=10)
+        y = np.linspace(self.image_top_edge/self.screen_height, self.image_bottom_edge/self.screen_height, num=10)
 
         xx, yy = np.meshgrid(x, y)
         calibration_map = np.column_stack([xx.ravel(), yy.ravel()])
@@ -498,10 +498,24 @@ class EyeTrackingObservationWrapper(ObservationWrapper):
         try:
             event, _ = self.gestures.step(frame, False, self.screen_width, self.screen_height, context="my_context")
             self.last_event_point = event.point
-            eye_tracking = np.array([
-                2 * (event.point[0] / self.screen_width) - 1,
-                2 * (event.point[1] / self.screen_height) - 1
-            ], dtype=np.float32)
+            # event.point is in screen coordinates. We need to convert it coordinates that are relative to the centered
+            # image. The image is centered in the screen, so its center and the screen center are the same.
+            # The fake eye tracking data it was trained with has -1 to 1 range, with 0 being the image center.
+            # The point data is in screen coordinates, meaning 0 to screen_width and 0 to screen_height, in floating
+            # point.
+            # 1. crop the point to the image
+            # outputs are in the range 0 to image_size
+            cropped_x = max(0, min(event.point[0] - (self.screen_width - self.image_size) // 2, self.image_size))
+            cropped_y = max(0, min(event.point[1] - (self.screen_height - self.image_size) // 2, self.image_size))
+
+            # 2. normalize the point to the image size
+            normalized_x = cropped_x / self.image_size
+            normalized_y = cropped_y / self.image_size
+
+            # 3. scale the point to the range -1 to 1
+            eye_tracking = np.array([normalized_x, normalized_y], dtype=np.float32)*2.0 - 1.0
+            self.last_eye_tracking = eye_tracking
+
         except:
             pass
 
@@ -517,31 +531,40 @@ class EyeTrackingObservationWrapper(ObservationWrapper):
     def step(self, action):
         obs, reward, truncated, terminated, info = super().step(action)
 
-        self.window.fill((0, 0, 0))  # Clear the window with black
-        window_width, window_height = self.window.get_size()
+        for i in range(2):
+            obs = self.observation(obs)
+            self.window.fill((0, 0, 0))  # Clear the window with black
+            window_width, window_height = self.window.get_size()
 
-        scaled_image = pygame.transform.scale(
-            pygame.surfarray.make_surface(self.base_env._human_image),
-            (min(self.screen_width, self.screen_height), min(self.screen_width, self.screen_height))
-        )
+            scaled_image = pygame.transform.scale(
+                pygame.surfarray.make_surface(self.base_env._human_image),
+                (self.image_size, self.image_size)
+            )
 
-        image_width, image_height = scaled_image.get_size()
-        x_offset = (window_width - image_width) // 2
-        y_offset = (window_height - image_height) // 2
-        pygame.draw.rect(self.window, (255, 255, 255), (x_offset, y_offset, image_width, image_height),
-                         2)  # White frame
+            image_width, image_height = scaled_image.get_size()
+            x_offset = (window_width - image_width) // 2
+            y_offset = (window_height - image_height) // 2
 
-        self.window.blit(scaled_image, (x_offset, y_offset))
+            self.window.blit(scaled_image, (x_offset, y_offset))
+            pygame.draw.rect(self.window, (255, 255, 255), (x_offset, y_offset, image_width, image_height),
+                             2)  # White frame
 
-        if self.last_event_point is not None:
-            # draw a red crosshair at the last event point
-            pygame.draw.line(self.window, (255, 0, 0), (self.last_event_point[0] - 10, self.last_event_point[1]),
-                             (self.last_event_point[0] + 10, self.last_event_point[1]), 2)
-            pygame.draw.line(self.window, (255, 0, 0), (self.last_event_point[0], self.last_event_point[1] - 10),
-                             (self.last_event_point[0], self.last_event_point[1] + 10), 2)
+            if self.last_event_point is not None:
+                # draw a red crosshair at the last event point, this is the eye tracking point as projected across the
+                # entire screen
+                pygame.draw.line(self.window, (255, 0, 0), (self.last_event_point[0] - 10, self.last_event_point[1]),
+                                 (self.last_event_point[0] + 10, self.last_event_point[1]), 2)
+                pygame.draw.line(self.window, (255, 0, 0), (self.last_event_point[0], self.last_event_point[1] - 10),
+                                 (self.last_event_point[0], self.last_event_point[1] + 10), 2)
 
-        self.clock.tick(self.fps)
-        pygame.display.flip()
+                # Draw a small red circle based on self.last_eye_tracking. This is the eye tracking point as projected onto
+                # the image. Recall that self.last_eye_tracking is in the range -1 to 1, with 0 being the image center.
+                eye_x = int((self.last_eye_tracking[0] + 1) / 2 * self.image_size)
+                eye_y = int((self.last_eye_tracking[1] + 1) / 2 * self.image_size)
+                pygame.draw.circle(self.window, (255, 0, 0), (eye_x + x_offset, eye_y + y_offset), 5)
+
+            self.clock.tick(self.fps)
+            pygame.display.flip()
 
         return obs, reward, truncated, terminated, info
 
@@ -577,9 +600,6 @@ class FakeEyeTrackingObservationWrapper(ObservationWrapper):
             self.base_env = env.env
 
         assert isinstance(self.base_env, BikkleGymEnvironment)
-
-        original_obs_space = env.observation_space
-        self.observation_space = original_obs_space
 
     def observation(self, observation):
         """
