@@ -14,8 +14,9 @@ from model import BikklePolicy, BikklePolicyParams, BikkleValueFunctionParams
 # Load the saved policy model
 # model_path = "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747399171_piacxpqy/checkpoint_614400.pth"
 # model_path = "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747399171_piacxpqy/checkpoint_51200.pth"
-model_path = "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747370163_80dcr9mx/checkpoint_1792000.pth"
-model_path = "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747399171_piacxpqy/checkpoint_1996800.pth"
+# model_path = "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747370163_80dcr9mx/checkpoint_1792000.pth"
+# model_path = "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747399171_piacxpqy/checkpoint_1996800.pth"
+model_path = "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747370163_80dcr9mx/checkpoint_1382400.pth"
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = "cpu"
 
@@ -84,7 +85,7 @@ while running:
     # Step the environment
     obs, reward, terminated, truncated, info = envs.step(action)
 
-    if reward != 0:
+    if "reward" in info and info["reward"] != 0:
         print(f"Reward: {info['reward']}")
 
     # Render the environment
