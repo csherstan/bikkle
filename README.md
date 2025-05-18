@@ -1,3 +1,14 @@
+Current python version: 3.10.16
+`pip install -r requirements.txt`
+
+Train a model (6.5 hours on my computer)
+
+```
+sh ./exp_ppo_self_bikkle2.sh
+```
+
+---
+
 This project was implemented as a first attempt at "vibe coding". This is the idea of doing most of the coding through
 an LLM agent. Also, my focus was more on speed of development rather than production quality.
 Thus, the overall layout of the project is not overly clean.
@@ -20,3 +31,4 @@ it.
   2. `fake-uniform`: fake eye tracking data is provided, but it is just uniform noise sampled over the whole arena. Not
   correlated with the high value block.
   3. `no_eye_tracking`: No eye tracking tokens are provided.
+- `view_eval_selfattention.py`: Used for human driven interaction with actual eye tracking data given a trained model.
