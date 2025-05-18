@@ -1,3 +1,22 @@
+2025-05-18
+
+Overnight I ran a job where the training used the fake eye tracking wrapper and had only a 25% chance of generating
+an observation with fake eyetracking data. The result was not what I hoped.
+https://wandb.ai/csherstan-team/ppo_continuous_action/runs/ksxwbe5h
+
+While the run looked out from the outside, when I ran the eval script against the model clocks there was essentially
+no difference between the fake uniform and fake Gaussian data sets.
+
+Also, is it really the right thing to do to just randomly drop out the eyetracking data? Maybe I should make the
+decision per episode instead.
+
+Next:
+- I need to get the video ready for the report. Yesterday I actually used the wrong model clock for creating the
+video, so I need to do it again with the right video.
+Use either:
+- /home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747370163_80dcr9mx/checkpoint_1382400.pth
+- /home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747370163_80dcr9mx/checkpoint_1740800.pth
+
 2025-05-17
 - I trained a model using 2 layers of self-attention for 4M steps. It has achieved much higher performance than
 previously observed: https://wandb.ai/csherstan-team/ppo_continuous_action/runs/piacxpqy. It was trained with fake eyetracking
