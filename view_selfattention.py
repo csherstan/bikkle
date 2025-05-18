@@ -16,7 +16,8 @@ from model import BikklePolicy, BikklePolicyParams, BikkleValueFunctionParams
 # model_path = "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747399171_piacxpqy/checkpoint_51200.pth"
 # model_path = "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747370163_80dcr9mx/checkpoint_1792000.pth"
 # model_path = "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747399171_piacxpqy/checkpoint_1996800.pth"
-model_path = "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747370163_80dcr9mx/checkpoint_1382400.pth"
+# model_path = "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747370163_80dcr9mx/checkpoint_1382400.pth"
+model_path = "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747370163_80dcr9mx/checkpoint_1740800.pth"
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = "cpu"
 
@@ -27,7 +28,7 @@ env = make_env("BikkleEyeTracking-v0", 0,
                run_name="",
                gamma=0.99,
                continuing=True,
-               num_blocks=4,
+               num_blocks=8,
                fps=10,
                )()
 # env = make_env("BikkleSelfAttention-v0", 0,
