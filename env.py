@@ -136,7 +136,7 @@ class BikkleGymEnvironment(gym.Env):
         self._update_screen_image()
 
         # Return initial observation
-        return self._get_observation(), {"high_reward_block": self.high_reward_block}
+        return self._get_observation(), {"high_reward_block": self.high_reward_block, "reward": 0.0}
 
     def _handle_timeout(self) -> None:
         """Handle timeout by changing the high reward block and resetting the timer."""
