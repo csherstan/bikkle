@@ -1,3 +1,4 @@
+import re
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -18,6 +19,7 @@ import matplotlib.pyplot as plt
 # model_path = "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747399171_piacxpqy"
 model_path = "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747370163_80dcr9mx"
 # model_path = "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/test"
+# model_path = "/home/sherstancraig/work/maincode/data/BikkleFakeEyeTracking-v0/leanrl_ppo_selfattention/1747494022_ksxwbe5h"
 device = "cpu"
 
 def run_one_eval(env, policy):
@@ -41,7 +43,7 @@ def run_one_eval(env, policy):
 
             # Step the environment
             obs, reward, terminated, truncated, info = envs.step(action)
-            episode_return += reward
+            episode_return += info["reward"]    # use raw reward instead of normalized
 
         returns.append(episode_return)
 
@@ -116,7 +118,10 @@ file_names = []
 if model_path.is_file():
     file_names.append(model_path)
 else:
-    file_names = [file for file in model_path.iterdir() if file.is_file()]
+    file_names = [file for file in model_path.iterdir() if file.is_file() and re.match(r"^checkpoint_\d+\.pth$", file.name)]
+
+for file_name in file_names:
+    print(f"Found: {file_name}")
 
 results_list = []
 for file_name in tqdm(file_names):
